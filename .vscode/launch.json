@@ -16,9 +16,10 @@
             "name": "(Linux) Launch",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceRoot}/target/debug/foo",
+            "program": "${workspaceRoot}/target/debug/tmd",
             "args": [],
             "cwd": "${workspaceRoot}",
+            "env": {},
             "preLaunchTask": "rust: cargo build"
         }
     ]
