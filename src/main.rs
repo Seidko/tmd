@@ -1,5 +1,5 @@
 #![feature(try_blocks)]
-use std::{collections::HashSet, fs, path::Path, sync::Arc};
+use std::{cell::LazyCell, collections::HashSet, env, fs, io::Read, panic, path::Path, sync::Arc};
 use reqwest::{Client, Proxy, Response, header, IntoUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, json, Value};
@@ -17,7 +17,7 @@ async fn get<U: IntoUrl>(url: U, proxy: &Option<String>) -> Result<Response, req
 }
 
 #[inline(always)]
-fn variables_data(user_id: &String, cursor: &Value, page_size: i32) -> String {    
+fn variables(user_id: &str, cursor: &Value, page_size: i32) -> String {    
     json!({
         "userId": user_id,
         "count": page_size,
@@ -35,8 +35,7 @@ fn variables_data(user_id: &String, cursor: &Value, page_size: i32) -> String {
     }).to_string()
 }
 
-#[inline(always)]
-fn feature_data() -> String {
+const FEATURE: LazyCell<String> = LazyCell::new(|| {
     json!({
         "responsive_web_twitter_blue_verified_badge_is_enabled": true,
         "verified_phone_label_enabled": false,
@@ -55,7 +54,7 @@ fn feature_data() -> String {
         "responsive_web_text_conversations_enabled": false,
         "responsive_web_enhance_cards_enabled": false,
     }).to_string()
-}
+});
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -71,6 +70,17 @@ struct Config {
 
 #[tokio::main]
 async fn main() {
+    if env::var("RUST_BACKTRACE").is_err() {
+        env::set_var("RUST_BACKTRACE", "1");
+    }
+    
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        hook(info);
+        let buf = &mut [0u8];
+        std::io::stdin().read_exact(buf).unwrap();
+    }));
+
     let raw = fs::read_to_string("./config.json").unwrap();
     let mut cursor = Value::Null;
     let mut join_set = JoinSet::new();
@@ -150,8 +160,13 @@ async fn main() {
         let new_cursor: String;
     
         let res = loop {
+            let query = [
+                ("variables", &variables(&config.user_id, &cursor, page_size)),
+                ("features", &*FEATURE)
+            ];
+
             if let Ok(res) = client.get("https://api.twitter.com/graphql/QK8AVO3RpcnbLPKXLAiVog/Likes")
-            .query(&[("variables", variables_data(&config.user_id, &cursor, page_size)), ("features", feature_data())])
+            .query(&query)
             .send().await {
                 break res;
             } else {
@@ -160,8 +175,11 @@ async fn main() {
         };
         
         let mut json: Value = res.json().await.unwrap();
+        // let text = res.text().await.unwrap();
+        // let _ = tokio::fs::write("sample/out.json", &text).await;
+        // let mut json: Value = serde_json::from_str(&text).unwrap();
         
-        match json["data"]["user"]["result"]["timeline_v2"]["timeline"]["instructions"][0]["entries"].take() {
+        match json["data"]["user"]["result"]["timeline"]["timeline"]["instructions"][0]["entries"].take() {
             serde_json::Value::Array(likes) => {
                 new_cursor = likes.last().unwrap()["content"]["value"].as_str().unwrap().to_string();
                 for mut item in likes {
