@@ -1,8 +1,8 @@
 #![feature(try_blocks)]
-use std::{collections::HashSet, fs, ops::Deref, path::Path, sync::Arc};
+use std::{collections::HashSet, fs, path::Path, sync::Arc};
 use reqwest::{Client, Proxy, Response, header, IntoUrl};
 use serde::{Deserialize, Serialize};
-use serde_json::{from_str, Value};
+use serde_json::{from_str, json, Value};
 use sysproxy::Sysproxy;
 use tokio::{fs::File, task::JoinSet};
 use futures::StreamExt;
@@ -17,22 +17,44 @@ async fn get<U: IntoUrl>(url: U, proxy: &Option<String>) -> Result<Response, req
 }
 
 #[inline(always)]
-fn variables_data(user_id: &String, cursor: &String, page_size: i32) -> String {
-    let mut cursor = cursor.clone();
-    if cursor != "null" {
-        if !cursor.starts_with("\"") {
-            cursor = String::from("\"") + &cursor;
-        }
-        if !cursor.ends_with("\"") {
-            cursor = cursor + "\"";
-        }
-    }
-    format!("{{\"userId\":\"{user_id}\",\"count\":{page_size},\"includePromotedContent\":false,\"withSuperFollowsUserFields\":false,\"withDownvotePerspective\":false,\"withReactionsMetadata\":false,\"withReactionsPerspective\":false,\"withSuperFollowsTweetFields\":false,\"withClientEventToken\":false,\"withBirdwatchNotes\":false,\"withVoice\":false,\"withV2Timeline\":true,\"cursor\":{cursor}}}")
+fn variables_data(user_id: &String, cursor: &Value, page_size: i32) -> String {    
+    json!({
+        "userId": user_id,
+        "count": page_size,
+        "cursor": cursor,
+        "includePromotedContent": false,
+        "withSuperFollowsUserFields": false,
+        "withDownvotePerspective": false,
+        "withReactionsMetadata": false,
+        "withReactionsPerspective": false,
+        "withSuperFollowsTweetFields": false,
+        "withClientEventToken": false,
+        "withBirdwatchNotes": false,
+        "withVoice": false,
+        "withV2Timeline": false,
+    }).to_string()
 }
 
 #[inline(always)]
 fn feature_data() -> String {
-    "{\"responsive_web_twitter_blue_verified_badge_is_enabled\":true,\"verified_phone_label_enabled\":false,\"responsive_web_graphql_timeline_navigation_enabled\":true,\"view_counts_public_visibility_enabled\":true,\"view_counts_everywhere_api_enabled\":true,\"longform_notetweets_consumption_enabled\":false,\"tweetypie_unmention_optimization_enabled\":true,\"responsive_web_uc_gql_enabled\":true,\"vibe_api_enabled\":true,\"responsive_web_edit_tweet_api_enabled\":true,\"graphql_is_translatable_rweb_tweet_is_translatable_enabled\":true,\"standardized_nudges_misinfo\":true,\"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled\":false,\"interactive_text_enabled\":true,\"responsive_web_text_conversations_enabled\":false,\"responsive_web_enhance_cards_enabled\":false}".into()
+    json!({
+        "responsive_web_twitter_blue_verified_badge_is_enabled": true,
+        "verified_phone_label_enabled": false,
+        "responsive_web_graphql_timeline_navigation_enabled": true,
+        "view_counts_public_visibility_enabled": true,
+        "view_counts_everywhere_api_enabled": true,
+        "longform_notetweets_consumption_enabled": false,
+        "tweetypie_unmention_optimization_enabled": true,
+        "responsive_web_uc_gql_enabled": true,
+        "vibe_api_enabled": true,
+        "responsive_web_edit_tweet_api_enabled": true,
+        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
+        "standardized_nudges_misinfo": true,
+        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": false,
+        "interactive_text_enabled": true,
+        "responsive_web_text_conversations_enabled": false,
+        "responsive_web_enhance_cards_enabled": false,
+    }).to_string()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,8 +72,7 @@ struct Config {
 #[tokio::main]
 async fn main() {
     let raw = fs::read_to_string("./config.json").unwrap();
-    let mut cursor = String::from("null");
-    let mut headers = header::HeaderMap::new();
+    let mut cursor = Value::Null;
     let mut join_set = JoinSet::new();
 
     let config: Config = from_str(raw.as_str()).unwrap();
@@ -73,24 +94,37 @@ async fn main() {
     }
     
     macro_rules! insert {
-        ($k:literal, $v:literal) => {
-            headers.insert($k, header::HeaderValue::from_static($v));
+        ($h:expr, $($k:literal, $v:literal),*) => {
+            $($h.insert($k, header::HeaderValue::from_static($v));)*
         }
     }
 
-    insert!("Accept", "*/*");
-    insert!("Accept-Language", "en-US,en;q=0.9");
-    insert!("Content-Type", "application/json");
-    insert!("Connection", "keep-alive");
-    insert!("Host", "api.twitter.com");
-    insert!("Origin", "https://twitter.com");
-    insert!("Referer", "https://twitter.com/");
-    insert!("X-Twitter-Active-User", "yes");
-    insert!("X-Twitter-Client-Language", "en");
-    insert!("X-Twitter-Auth-Type", "OAuth2Session");
-    headers.insert("Authorization", header::HeaderValue::from_str(config.authorization.as_str()).unwrap());
-    headers.insert("X-Csrf-Token", header::HeaderValue::from_str(config.csrf_token.as_str()).unwrap());
-    headers.insert("Cookie", header::HeaderValue::from_str(config.cookies.as_str()).unwrap());
+    macro_rules! ins_str {
+        ($h:expr, $($k:literal, $v:expr),*) => {
+            $($h.insert($k, header::HeaderValue::from_str(($v).as_str()).unwrap());)*
+        }
+    }
+
+    let mut headers = header::HeaderMap::new();
+    insert!(
+        headers,
+        "Accept", "*/*",
+        "Accept-Language", "en-US,en;q=0.9",
+        "Content-Type", "application/json",
+        "Connection", "keep-alive",
+        "Host", "api.twitter.com",
+        "Origin", "https://twitter.com",
+        "Referer", "https://twitter.com/",
+        "X-Twitter-Active-User", "yes",
+        "X-Twitter-Client-Language", "en",
+        "X-Twitter-Auth-Type", "OAuth2Session"
+    );
+    ins_str!(
+        headers,
+        "Authorization", config.authorization,
+        "X-Csrf-Token", config.csrf_token,
+        "Cookie", config.cookies
+    );
     
     let mut builder = Client::builder()
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15")
@@ -105,7 +139,7 @@ async fn main() {
         Some(format!("http://{}:{}", sysproxy.host, sysproxy.port))
     }).into();
 
-    if let Some(proxy) = proxy.deref() {
+    if let Some(proxy) = &*proxy {
         builder = builder.proxy(Proxy::all(proxy).unwrap());
     }
 
@@ -175,12 +209,12 @@ async fn main() {
                                 let id = id.clone();
                                 let username = username.clone();
                                 let dir = dir.clone();
-                                let closure = async move {
+                                let future = async move {
                                     let mut stream = loop {
-                                        if let Ok(res) = get(&url, proxy.deref()).await {
+                                        if let Ok(res) = get(&url, &*proxy).await {
                                             break res.bytes_stream();
                                         } else {
-                                            println!("Warning: 429 or network err.")
+                                            println!("Warning: 429 or network err, retrying...")
                                         }
                                     };
                                     let ext = ext.unwrap();
@@ -198,10 +232,10 @@ async fn main() {
                             
                                 if concurrency > 0 {
                                     concurrency -= 1;
-                                    join_set.spawn(closure);
+                                    join_set.spawn(future);
                                 } else {
                                     join_set.join_next().await;
-                                    join_set.spawn(closure);
+                                    join_set.spawn(future);
                                 }
                             }
                             media_index += 1;
@@ -215,7 +249,8 @@ async fn main() {
         if new_cursor == cursor {
             break;
         }
-        cursor = new_cursor;
+
+        cursor = Value::String(new_cursor);
     }
 
     while let Some(_) = join_set.join_next().await {}
