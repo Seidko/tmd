@@ -29,5 +29,5 @@ jobs:
           bin: tmd
           target: ${{ matrix.target }}
           tar: unix
-          zip: all
+          zip: windows
           token: ${{ secrets.GITHUB_TOKEN }}
