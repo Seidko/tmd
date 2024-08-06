@@ -1,5 +1,5 @@
 #![feature(try_blocks)]
-use std::{cell::LazyCell, collections::HashSet, env, fs, io::Read, panic, path::Path, sync::Arc, time::Duration};
+use std::{collections::HashSet, env, fs, io::Read, panic, path::Path, sync::{Arc, LazyLock}, time::Duration};
 use reqwest::{header, Client, IntoUrl, Proxy, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, json, Value};
@@ -35,7 +35,7 @@ fn variables(user_id: &str, cursor: &Value, page_size: i32) -> String {
     }).to_string()
 }
 
-const FEATURE: LazyCell<String> = LazyCell::new(|| {
+static FEATURE: LazyLock<String> = LazyLock::new(|| {
     json!({
         "responsive_web_twitter_blue_verified_badge_is_enabled": true,
         "verified_phone_label_enabled": false,
@@ -232,7 +232,7 @@ async fn main() {
                         let future = async move {
                             'retry: loop {
                                 let mut stream = loop {
-                                    let result = get(&url, &*proxy).await;
+                                    let result = get(&url, &proxy).await;
                                     match result {
                                         Ok(res) => break res.bytes_stream(),
                                         Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
@@ -284,5 +284,5 @@ async fn main() {
         cursor = Value::String(new_cursor);
     }
 
-    while let Some(_) = join_set.join_next().await {}
+    while join_set.join_next().await.is_some() {}
 }
