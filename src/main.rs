@@ -1,10 +1,10 @@
 #![feature(try_blocks)]
-use std::{cell::LazyCell, collections::HashSet, env, fs, io::Read, panic, path::Path, sync::Arc};
-use reqwest::{Client, Proxy, Response, header, IntoUrl};
+use std::{cell::LazyCell, collections::HashSet, env, fs, io::Read, panic, path::Path, sync::Arc, time::Duration};
+use reqwest::{header, Client, IntoUrl, Proxy, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, json, Value};
 use sysproxy::Sysproxy;
-use tokio::{fs::File, task::JoinSet};
+use tokio::{fs::File, task::JoinSet, time};
 use futures::StreamExt;
 use tokio::io::copy;
 
@@ -56,6 +56,8 @@ const FEATURE: LazyCell<String> = LazyCell::new(|| {
     }).to_string()
 });
 
+const FIVE_SECOUND: Duration = time::Duration::from_secs(5);
+
 #[derive(Serialize, Deserialize)]
 struct Config {
     user_id: String,
@@ -88,7 +90,7 @@ async fn main() {
     let config: Config = from_str(raw.as_str()).unwrap();
     let page_size = config.page_size.unwrap_or(100);
     let mut concurrency = config.concurrency.unwrap_or(50);
-    let dir = config.path.unwrap_or("./media".into());
+    let dir = config.path.unwrap_or("./media".to_string());
 
     let mut set: HashSet<[String; 2]> = HashSet::new();
     if let Ok(paths) = std::fs::read_dir(&dir) {
@@ -174,96 +176,107 @@ async fn main() {
             }
         };
         
-        let mut json: Value = res.json().await.unwrap();
+        let json: Value = res.json().await.unwrap();
         // let text = res.text().await.unwrap();
         // let _ = tokio::fs::write("sample/out.json", &text).await;
         // let mut json: Value = serde_json::from_str(&text).unwrap();
+
+        let timeline = json["data"]["user"]["result"].get("timeline")
+            .or(json["data"]["user"]["result"].get("timeline_v2")).unwrap();
         
-        match json["data"]["user"]["result"]["timeline"]["timeline"]["instructions"][0]["entries"].take() {
-            serde_json::Value::Array(likes) => {
-                new_cursor = likes.last().unwrap()["content"]["value"].as_str().unwrap().to_string();
-                for mut item in likes {
-                    let mut result = item["content"]["itemContent"]["tweet_results"]["result"].take();
-                    if let serde_json::Value::Null = result {
-                        continue;
-                    }
+        if let serde_json::Value::Array(likes) = &timeline["timeline"]["instructions"][0]["entries"] {
+            new_cursor = likes.last().unwrap()["content"]["value"].as_str().unwrap().to_string();
+            for item in likes {
+                let result = &item["content"]["itemContent"]["tweet_results"]["result"];
+                if result.is_null() {
+                    continue;
+                }
 
-                    let id: String = result["legacy"]["id_str"].as_str()
-                    .or_else(|| result["tweet"]["legacy"]["id_str"].as_str())
-                    .unwrap().to_string().into();
+                let id = result["legacy"]["id_str"].as_str()
+                    .or(result["tweet"]["legacy"]["id_str"].as_str())
+                    .unwrap().to_string();
 
-                    let username: String = result["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str()
-                    .or_else(|| result["tweet"]["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str())
-                    .unwrap().to_string().into();
+                let username = result["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str()
+                    .or(result["tweet"]["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str())
+                    .unwrap().to_string();
 
-                    if set.contains(&[username.clone(), id.clone()]) {
-                        continue;
-                    }
-                
-                    let temp = result["legacy"]["entities"]["media"].take();
-                    let media = temp.as_array();
-                
-                    if let Some(media) = media {
-                        let mut media_index = 1;
-                        for item in media {
-                            let media_type = item["type"].as_str().unwrap();
-                            let url: Option<String>;
-                            let ext: Option<String>;
-                            match media_type {
-                                "photo" => {
-                                    let media_url_https = item["media_url_https"].as_str().unwrap().to_string();
-                                    ext = Some(Path::new(media_url_https.as_str()).extension().unwrap().to_str().unwrap().to_string());
-                                    url = Some(media_url_https + "?name=orig")
-                                }
-                                "animated_gif" | "video" => {
-                                    let media_url_https = item["video_info"]["variants"].as_array().unwrap().last().unwrap()["url"].as_str().unwrap().to_string();
-                                    ext = Some("mp4".into());
-                                    url = Some(media_url_https);
-                                }
-                                _ => panic!("Unknown media type {}.", media_type)
+                if set.contains(&[username.clone(), id.clone()]) {
+                    continue;
+                }
+            
+                let temp = &result["legacy"]["entities"]["media"];
+                let media = temp.as_array();
+            
+                if let Some(media) = media {
+                    let mut media_index = 1;
+                    for item in media {
+                        let media_type = item["type"].as_str().unwrap();
+                        let (url, ext) = match media_type {
+                            "photo" => {
+                                let media_url_https = item["media_url_https"].as_str().unwrap().to_string();
+                                let url = media_url_https.clone() + "?name=orig";
+                                let ext = Path::new(media_url_https.as_str()).extension().unwrap().to_str().unwrap().to_string();
+                                (url, ext)
                             }
-                            if let Some(url) = url {
-                                let proxy = proxy.clone();
-                                let id = id.clone();
-                                let username = username.clone();
-                                let dir = dir.clone();
-                                let future = async move {
-                                    let mut stream = loop {
-                                        if let Ok(res) = get(&url, &*proxy).await {
-                                            break res.bytes_stream();
-                                        } else {
-                                            println!("Warning: 429 or network err, retrying...")
+                            "animated_gif" | "video" => {
+                                let media_url_https = item["video_info"]["variants"]
+                                    .as_array().unwrap().last().unwrap()["url"].as_str().unwrap().to_string();
+                                (media_url_https, "mp4".to_string())
+                            }
+                            _ => panic!("Unknown media type {}.", media_type)
+                        };
+                        let proxy = proxy.clone();
+                        let id = id.clone();
+                        let username = username.clone();
+                        let dir = dir.clone();
+                        let future = async move {
+                            'retry: loop {
+                                let mut stream = loop {
+                                    let result = get(&url, &*proxy).await;
+                                    match result {
+                                        Ok(res) => break res.bytes_stream(),
+                                        Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
+                                            println!("Warning: too many request, sleep 5 secs and retrying...");
+                                            time::sleep(FIVE_SECOUND).await;
                                         }
-                                    };
-                                    let ext = ext.unwrap();
-                                    let file_name = format!("{username} {id} {media_index}.{ext}");
-                                    let path = Path::new(&dir).join(&file_name);
-                                    let file = File::create(&path).await;
-                                    if let Ok(mut file) = file {
-                                        while let Some(item) = stream.next().await {
-                                            copy(&mut item.unwrap().as_ref(), &mut file).await.unwrap();
+                                        Err(err) => {
+                                            println!("Unknown request error {:?}, retrying...", err);
                                         }
-                                    } else {
-                                        println!("Cannot create file {}, skipped.", &file_name);
                                     }
                                 };
-                            
-                                if concurrency > 0 {
-                                    concurrency -= 1;
-                                    join_set.spawn(future);
+                                let file_name = format!("{username} {id} {media_index}.{ext}");
+                                let path = Path::new(&dir).join(&file_name);
+                                let file = File::create(&path).await;
+                                if let Ok(mut file) = file {
+                                    while let Some(item) = stream.next().await {
+                                        if copy(&mut item.unwrap().as_ref(), &mut file).await.is_err() {
+                                            let _ = tokio::fs::remove_file(&path).await;
+                                            continue 'retry;
+                                        }
+                                    }
                                 } else {
-                                    join_set.join_next().await;
-                                    join_set.spawn(future);
+                                    println!("Cannot create file {}, skipped.", &file_name);
                                 }
+                                break;
                             }
-                            media_index += 1;
+                        };
+                    
+                        if concurrency > 0 {
+                            concurrency -= 1;
+                            join_set.spawn(future);
+                        } else {
+                            join_set.join_next().await;
+                            join_set.spawn(future);
                         }
+                        
+                        media_index += 1;
                     }
                 }
             }
-            _ => panic!("Unknown value.")
-        };
-    
+        } else {
+            panic!("Unknown value of `entries`.")
+        }
+
         if new_cursor == cursor {
             break;
         }
