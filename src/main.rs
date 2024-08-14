@@ -4,7 +4,7 @@ use reqwest::{header, Client, IntoUrl, Proxy, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, json, Value};
 use sysproxy::Sysproxy;
-use tokio::{fs::File, task::JoinSet, time};
+use tokio::{fs::File, time};
 use futures::StreamExt;
 use tokio::io::copy;
 
@@ -64,7 +64,7 @@ struct Config {
     authorization: String,
     cookies: String,
     csrf_token: String,
-    concurrency: Option<i32>,
+    concurrency: Option<usize>,
     page_size: Option<i32>,
     proxy: Option<String>,
     path: Option<String>,
@@ -85,11 +85,10 @@ async fn main() {
 
     let raw = fs::read_to_string("./config.json").unwrap();
     let mut cursor = Value::Null;
-    let mut join_set = JoinSet::new();
 
     let config: Config = from_str(raw.as_str()).unwrap();
     let page_size = config.page_size.unwrap_or(100);
-    let mut concurrency = config.concurrency.unwrap_or(50);
+    let sem = Arc::new(tokio::sync::Semaphore::new(config.concurrency.unwrap_or(50)));
     let dir = config.path.unwrap_or("./media".to_string());
 
     let mut set: HashSet<[String; 2]> = HashSet::new();
@@ -229,7 +228,9 @@ async fn main() {
                         let id = id.clone();
                         let username = username.clone();
                         let dir = dir.clone();
-                        let future = async move {
+                        let sem = sem.clone();
+                        tokio::spawn(async move {
+                            let _permit = sem.acquire().await.unwrap();
                             'retry: loop {
                                 let mut stream = loop {
                                     let result = get(&url, &proxy).await;
@@ -259,16 +260,7 @@ async fn main() {
                                 }
                                 break;
                             }
-                        };
-                    
-                        if concurrency > 0 {
-                            concurrency -= 1;
-                            join_set.spawn(future);
-                        } else {
-                            join_set.join_next().await;
-                            join_set.spawn(future);
-                        }
-                        
+                        });
                         media_index += 1;
                     }
                 }
@@ -283,6 +275,4 @@ async fn main() {
 
         cursor = Value::String(new_cursor);
     }
-
-    while join_set.join_next().await.is_some() {}
 }
