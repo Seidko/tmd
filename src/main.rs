@@ -1,6 +1,7 @@
 #![feature(try_blocks)]
 use std::{collections::HashSet, env, fs, io::Read, panic, path::Path, sync::{Arc, LazyLock}, time::Duration};
-use reqwest::{header, Client, IntoUrl, Proxy, Response, StatusCode};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use reqwest::{header, Client, Proxy, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, json, Value};
 use sysproxy::Sysproxy;
@@ -9,15 +10,7 @@ use futures::StreamExt;
 use tokio::io::copy;
 
 #[inline(always)]
-async fn get<U: IntoUrl>(url: U, proxy: &Option<String>) -> Result<Response, reqwest::Error> {
-  if let Some(proxy) = proxy {
-    return Client::builder().proxy(Proxy::all(proxy).unwrap()).build()?.get(url).send().await;
-  }
-  Client::builder().build()?.get(url).send().await
-}
-
-#[inline(always)]
-fn variables(user_id: &str, cursor: &Value, page_size: i32) -> String {
+fn tweet_variables(user_id: &str, cursor: &Value, page_size: i32) -> String {
   json!({
     "userId": user_id,
     "count": page_size,
@@ -35,7 +28,15 @@ fn variables(user_id: &str, cursor: &Value, page_size: i32) -> String {
   }).to_string()
 }
 
-static FEATURE: LazyLock<String> = LazyLock::new(|| {
+#[inline(always)]
+fn user_variables(screen_name: &str) -> String {
+  json!({
+    "screen_name": screen_name,
+    "withSafetyModeUserFields": true,
+  }).to_string()
+}
+
+static TWEET_FEATURE: LazyLock<String> = LazyLock::new(|| {
   json!({
     "responsive_web_twitter_blue_verified_badge_is_enabled": true,
     "verified_phone_label_enabled": false,
@@ -56,11 +57,29 @@ static FEATURE: LazyLock<String> = LazyLock::new(|| {
   }).to_string()
 });
 
+static USER_FEATUREL: LazyLock<String> = LazyLock::new(|| {
+  json!({
+    "hidden_profile_subscriptions_enabled": true,
+    "rweb_tipjar_consumption_enabled": true,
+    "responsive_web_graphql_exclude_directive_enabled": true,
+    "verified_phone_label_enabled": false,
+    "subscriptions_verification_info_is_identity_verified_enabled": true,
+    "subscriptions_verification_info_verified_since_enabled": true,
+    "highlights_tweets_tab_ui_enabled": true,
+    "responsive_web_twitter_article_notes_tab_enabled": true,
+    "subscriptions_feature_can_gift_premium": true,
+    "creator_subscriptions_tweet_preview_api_enabled": true,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+    "responsive_web_graphql_timeline_navigation_enabled": true
+  }).to_string()
+});
+
 const FIVE_SECOUND: Duration = time::Duration::from_secs(5);
+const USER_AGENT: &'static str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15";
 
 #[derive(Serialize, Deserialize)]
 struct Config {
-  user_id: String,
+  user_name: String,
   authorization: String,
   cookies: String,
   csrf_token: String,
@@ -83,6 +102,11 @@ async fn main() {
     std::io::stdin().read_exact(buf).unwrap();
   }));
 
+  let mprogress = MultiProgress::new();
+  let style = ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+  .unwrap()
+  .progress_chars("##-");
+
   let raw = fs::read_to_string("./config.json").unwrap();
   let mut cursor = Value::Null;
 
@@ -91,7 +115,7 @@ async fn main() {
   let sem = Arc::new(tokio::sync::Semaphore::new(config.concurrency.unwrap_or(50)));
   let dir = config.path.unwrap_or("./media".to_string());
 
-  let mut set: HashSet<[String; 2]> = HashSet::new();
+  let mut set: HashSet<(String, String, i32)> = HashSet::new();
   if let Ok(paths) = std::fs::read_dir(&dir) {
     for entry in paths {
       let path = entry.unwrap().path();
@@ -99,18 +123,12 @@ async fn main() {
       let mut split = file_stem.to_str().unwrap().split(" ");
 
       let _: Option<_> = try {
-        set.insert([split.next()?.to_string(), split.next()?.to_string()]);
+        set.insert((split.next()?.to_string(), split.next()?.to_string(), split.next()?.parse::<i32>().unwrap()));
       };
     }
   }
 
   macro_rules! insert {
-    ($h:expr, $($k:literal, $v:literal),*) => {
-      $($h.insert($k, header::HeaderValue::from_static($v));)*
-    }
-  }
-
-  macro_rules! ins_str {
     ($h:expr, $($k:literal, $v:expr),*) => {
       $($h.insert($k, header::HeaderValue::from_str(($v).as_str()).unwrap());)*
     }
@@ -119,54 +137,84 @@ async fn main() {
   let mut headers = header::HeaderMap::new();
   insert!(
     headers,
-    "Accept", "*/*",
-    "Accept-Language", "en-US,en;q=0.9",
-    "Content-Type", "application/json",
-    "Connection", "keep-alive",
-    "Host", "api.twitter.com",
-    "Origin", "https://twitter.com",
-    "Referer", "https://twitter.com/",
-    "X-Twitter-Active-User", "yes",
-    "X-Twitter-Client-Language", "en",
-    "X-Twitter-Auth-Type", "OAuth2Session"
-  );
-  ins_str!(
-    headers,
     "Authorization", config.authorization,
     "X-Csrf-Token", config.csrf_token,
     "Cookie", config.cookies
   );
 
   let mut builder = Client::builder()
-    .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15")
+    .user_agent(USER_AGENT)
     .default_headers(headers)
     .gzip(true);
 
-  let proxy: Arc<Option<String>> = config.proxy.or_else(|| {
+  let proxy: Option<Proxy> = config.proxy.or_else(|| {
     let sysproxy = Sysproxy::get_system_proxy().ok()?;
     if !sysproxy.enable {
       return None;
     }
     Some(format!("http://{}:{}", sysproxy.host, sysproxy.port))
-  }).into();
+  }).map(|s| Proxy::all(s).unwrap());
 
-  if let Some(proxy) = &*proxy {
-    builder = builder.proxy(Proxy::all(proxy).unwrap());
+  if let Some(proxy) = proxy.clone() {
+    builder = builder.proxy(proxy);
   }
 
-  let client = builder.build().unwrap();
+  let xhr_client = builder.build().unwrap();
+
+  builder = Client::builder().user_agent(USER_AGENT).gzip(true);
+  if let Some(proxy) = proxy.clone() {
+    builder = builder.proxy(proxy);
+  }
+
+  let media_client = builder.build().unwrap();
+
+  let (user_id, fav_count) = {
+    let uv = user_variables(&config.user_name);
+    let query = [
+      ("variables", uv.as_str()),
+      ("features", USER_FEATUREL.as_str()),
+      ("fieldToggles", "{\"withAuxiliaryUserLabels\":false}")
+    ];
+
+    let res = loop {
+      if let Ok(res) = xhr_client.get("https://x.com/i/api/graphql/Yka-W8dz7RaEuQNkroPkYw/UserByScreenName")
+        .query(&query)
+        .send().await {
+          break res;
+      } else {
+        println!("Warning: 429 or network err.")
+      }
+    };
+
+    match res.json::<Value>().await {
+      Ok(json) => {
+        let result = &json["data"]["user"]["result"];
+        let user_id = result["rest_id"].as_str().unwrap().to_owned();
+        let fav_count = result["legacy"]["favourites_count"].as_u64().unwrap();
+        (user_id, fav_count)
+      }
+      Err(err) => {
+        panic!("Unknown error {:?}", err);
+      }
+    }
+  };
+
   let _ = fs::create_dir(&dir);
+  let total_pb = mprogress.add(ProgressBar::new(fav_count));
+  let media_pb = mprogress.add(ProgressBar::new(0));
+  total_pb.set_style(style.clone());
+  media_pb.set_style(style.clone());
 
   loop {
     let new_cursor: String;
 
     let res = loop {
       let query = [
-        ("variables", &variables(&config.user_id, &cursor, page_size)),
-        ("features", &*FEATURE)
+        ("variables", &tweet_variables(&user_id, &cursor, page_size)),
+        ("features", &*TWEET_FEATURE)
       ];
 
-      if let Ok(res) = client.get("https://api.twitter.com/graphql/QK8AVO3RpcnbLPKXLAiVog/Likes")
+      if let Ok(res) = xhr_client.get("https://api.twitter.com/graphql/QK8AVO3RpcnbLPKXLAiVog/Likes")
       .query(&query)
       .send().await {
         break res;
@@ -199,16 +247,16 @@ async fn main() {
           .or(result["tweet"]["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str())
           .unwrap().to_string();
 
-        if set.contains(&[username.clone(), id.clone()]) {
-          continue;
-        }
-
         let temp = &result["legacy"]["entities"]["media"];
         let media = temp.as_array();
 
         if let Some(media) = media {
           let mut media_index = 1;
           for item in media {
+            if set.contains(&(username.clone(), id.clone(), media_index)) {
+              continue;
+            }
+            media_pb.inc_length(1);
             let media_type = item["type"].as_str().unwrap();
             let (url, ext) = match media_type {
               "photo" => {
@@ -224,16 +272,18 @@ async fn main() {
               }
               _ => panic!("Unknown media type {}.", media_type)
             };
-            let proxy = proxy.clone();
             let id = id.clone();
             let username = username.clone();
             let dir = dir.clone();
             let sem = sem.clone();
+            let client = media_client.clone();
+            let media_pb = media_pb.clone();
             tokio::spawn(async move {
+              media_pb.set_message(format!("http://x.com/{username}/status/{id}"));
               let _permit = sem.acquire().await.unwrap();
               'retry: loop {
                 let mut stream = loop {
-                  let result = get(&url, &proxy).await;
+                  let result = client.get(&url).send().await;
                   match result {
                     Ok(res) => break res.bytes_stream(),
                     Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
@@ -258,12 +308,14 @@ async fn main() {
                 } else {
                   println!("Cannot create file {}, skipped.", &file_name);
                 }
+                media_pb.inc(1);
                 break;
               }
             });
             media_index += 1;
           }
         }
+        total_pb.inc(1);
       }
     } else {
       panic!("Unknown value of `entries`.")

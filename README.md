@@ -9,7 +9,7 @@ Find these value and fill it in `config.json` under the same path with executabl
 `config.json`
 ```json5
 {
-    "user_id": "", // in query string, `variables.userId`
+    "user_name": "", // your user name
     "authorization": "", // in header, `authorization`
     "cookies": "", // in header, `cookies`
     "csrf_token": "", // in header, `x-csrf-token`
