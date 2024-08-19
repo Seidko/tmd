@@ -36,6 +36,12 @@ fn user_variables(screen_name: &str) -> String {
   }).to_string()
 }
 
+#[inline(always)]
+fn pause() {
+  let buf = &mut [0u8];
+  std::io::stdin().read_exact(buf).unwrap();
+}
+
 static TWEET_FEATURE: LazyLock<String> = LazyLock::new(|| {
   json!({
     "responsive_web_twitter_blue_verified_badge_is_enabled": true,
@@ -87,30 +93,31 @@ struct Config {
   page_size: Option<i32>,
   proxy: Option<String>,
   path: Option<String>,
+  pause_on_end: Option<bool>,
+  pause_on_panic: Option<bool>,
 }
 
 #[tokio::main]
 async fn main() {
-  if env::var("RUST_BACKTRACE").is_err() {
-    env::set_var("RUST_BACKTRACE", "1");
+  let raw = fs::read_to_string("./config.json").unwrap();
+  let config: Config = from_str(raw.as_str()).unwrap();
+  if config.pause_on_panic.unwrap_or(false) {
+    if env::var("RUST_BACKTRACE").is_err() {
+      env::set_var("RUST_BACKTRACE", "1");
+    }
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+      hook(info);
+      pause();
+    }));
   }
-
-  let hook = panic::take_hook();
-  panic::set_hook(Box::new(move |info| {
-    hook(info);
-    let buf = &mut [0u8];
-    std::io::stdin().read_exact(buf).unwrap();
-  }));
 
   let mprogress = MultiProgress::new();
   let style = ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
   .unwrap()
   .progress_chars("##-");
 
-  let raw = fs::read_to_string("./config.json").unwrap();
   let mut cursor = Value::Null;
-
-  let config: Config = from_str(raw.as_str()).unwrap();
   let page_size = config.page_size.unwrap_or(100);
   let sem = Arc::new(tokio::sync::Semaphore::new(config.concurrency.unwrap_or(50)));
   let dir = config.path.unwrap_or("./media".to_string());
@@ -326,5 +333,10 @@ async fn main() {
     }
 
     cursor = Value::String(new_cursor);
+  }
+  total_pb.set_message("Done!");
+  media_pb.set_message("Done!");
+  if config.pause_on_end.unwrap_or(false) {
+    pause();
   }
 }
