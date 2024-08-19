@@ -325,7 +325,7 @@ async fn main() {
         total_pb.inc(1);
       }
     } else {
-      panic!("Unknown value of `entries`.")
+      panic!("Data may be Null, please check your user name.")
     }
 
     if new_cursor == cursor {
