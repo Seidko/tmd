@@ -1,9 +1,9 @@
 #![feature(try_blocks)]
-use std::{collections::HashSet, env, fs, io::Read, panic, path::Path, sync::{Arc, LazyLock}, time::Duration};
+use std::{collections::HashSet, env, fs, io::{Read, Write}, panic, path::Path, sync::{Arc, LazyLock}, time::Duration};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::{header, Client, Proxy, StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json::{from_str, json, Value};
+use serde_json::{from_str, to_string_pretty, json, Value};
 use sysproxy::Sysproxy;
 use tokio::{fs::File, time};
 use futures::StreamExt;
@@ -40,6 +40,12 @@ fn user_variables(screen_name: &str) -> String {
 fn pause() {
   let buf = &mut [0u8];
   std::io::stdin().read_exact(buf).unwrap();
+}
+
+fn output_malform_json(json: &Value, name: &str) -> ! {
+  let mut file = fs::File::create(format!("./{}.json", name)).unwrap();
+  file.write(to_string_pretty(json).unwrap().as_bytes()).unwrap();
+  panic!("Error: malform json")
 }
 
 static TWEET_FEATURE: LazyLock<String> = LazyLock::new(|| {
@@ -196,8 +202,8 @@ async fn main() {
     match res.json::<Value>().await {
       Ok(json) => {
         let result = &json["data"]["user"]["result"];
-        let user_id = result["rest_id"].as_str().unwrap().to_owned();
-        let fav_count = result["legacy"]["favourites_count"].as_u64().unwrap();
+        let user_id = result["rest_id"].as_str().unwrap_or_else(|| output_malform_json(&json, "likes")).to_owned();
+        let fav_count = result["legacy"]["favourites_count"].as_u64().unwrap_or_else(|| output_malform_json(&json, "likes"));
         (user_id, fav_count)
       }
       Err(err) => {
@@ -231,15 +237,14 @@ async fn main() {
     };
 
     let json: Value = res.json().await.unwrap();
-    // let text = res.text().await.unwrap();
-    // let _ = tokio::fs::write("sample/out.json", &text).await;
-    // let mut json: Value = serde_json::from_str(&text).unwrap();
 
     let timeline = json["data"]["user"]["result"].get("timeline")
-      .or(json["data"]["user"]["result"].get("timeline_v2")).unwrap();
+      .or(json["data"]["user"]["result"].get("timeline_v2"))
+      .unwrap_or_else(|| output_malform_json(&json, "likes"));
 
     if let serde_json::Value::Array(likes) = &timeline["timeline"]["instructions"][0]["entries"] {
-      new_cursor = likes.last().unwrap()["content"]["value"].as_str().unwrap().to_string();
+      new_cursor = likes.last().unwrap_or_else(|| output_malform_json(&json, "likes"))["content"]["value"].as_str()
+        .unwrap_or_else(|| output_malform_json(&json, "likes")).to_string();
       for item in likes {
         let result = &item["content"]["itemContent"]["tweet_results"]["result"];
         if result.is_null() {
@@ -248,11 +253,11 @@ async fn main() {
 
         let id = result["legacy"]["id_str"].as_str()
           .or(result["tweet"]["legacy"]["id_str"].as_str())
-          .unwrap().to_string();
+          .unwrap_or_else(|| output_malform_json(&json, "likes")).to_string();
 
         let username = result["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str()
           .or(result["tweet"]["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str())
-          .unwrap().to_string();
+          .unwrap_or_else(|| output_malform_json(&json, "likes")).to_string();
 
         let temp = &result["legacy"]["entities"]["media"];
         let media = temp.as_array();
@@ -264,17 +269,19 @@ async fn main() {
               continue;
             }
             media_pb.inc_length(1);
-            let media_type = item["type"].as_str().unwrap();
+            let media_type = item["type"].as_str().unwrap_or_else(|| output_malform_json(&json, "likes"));
             let (url, ext) = match media_type {
               "photo" => {
-                let media_url_https = item["media_url_https"].as_str().unwrap().to_string();
+                let media_url_https = item["media_url_https"].as_str().unwrap_or_else(|| output_malform_json(&json, "likes")).to_string();
                 let url = media_url_https.clone() + "?name=orig";
                 let ext = Path::new(media_url_https.as_str()).extension().unwrap().to_str().unwrap().to_string();
                 (url, ext)
               }
               "animated_gif" | "video" => {
                 let media_url_https = item["video_info"]["variants"]
-                  .as_array().unwrap().last().unwrap()["url"].as_str().unwrap().to_string();
+                  .as_array().unwrap_or_else(|| output_malform_json(&json, "likes"))
+                  .last().unwrap_or_else(|| output_malform_json(&json, "likes"))["url"]
+                  .as_str().unwrap_or_else(|| output_malform_json(&json, "likes")).to_string();
                 (media_url_https, "mp4".to_string())
               }
               _ => panic!("Unknown media type {}.", media_type)
