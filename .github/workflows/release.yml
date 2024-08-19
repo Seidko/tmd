@@ -10,7 +10,9 @@ on:
       - published
 
 jobs:
-  upload-assets:
+  build-release:
+    group: build-release
+      cancel-in-progress: true
     strategy:
       matrix:
         include:
