@@ -5,9 +5,8 @@ use reqwest::{header, Client, Proxy, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, to_string_pretty, json, Value};
 use sysproxy::Sysproxy;
-use tokio::{fs::File, time};
+use tokio::{fs::File, io::AsyncWriteExt, time};
 use futures::StreamExt;
-use tokio::io::copy;
 
 #[inline(always)]
 fn tweet_variables(user_id: &str, cursor: &Value, page_size: i32) -> String {
@@ -311,11 +310,11 @@ async fn main() {
                 };
                 let file_name = format!("{username} {id} {media_index}.{ext}");
                 let path = Path::new(&dir).join(&file_name);
-                let file = File::create(&path).await;
-                if let Ok(mut file) = file {
+                if let Ok(mut file) = File::create(&path).await {
                   while let Some(item) = stream.next().await {
-                    if copy(&mut item.unwrap().as_ref(), &mut file).await.is_err() {
+                    if item.is_err() || file.write(&item.unwrap()).await.is_err() {
                       let _ = tokio::fs::remove_file(&path).await;
+                      println!("Error on writing file or disconnected, retrying...");
                       continue 'retry;
                     }
                   }
