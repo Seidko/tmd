@@ -127,7 +127,7 @@ async fn main() {
   let sem = Arc::new(tokio::sync::Semaphore::new(config.concurrency.unwrap_or(50)));
   let dir = config.path.unwrap_or("./media".to_string());
 
-  let mut set: HashSet<(String, String, i32)> = HashSet::new();
+  let mut set: HashSet<(String, u64, usize)> = HashSet::new();
   if let Ok(paths) = std::fs::read_dir(&dir) {
     for entry in paths {
       let path = entry.unwrap().path();
@@ -135,7 +135,7 @@ async fn main() {
       let mut split = file_stem.to_str().unwrap().split(" ");
 
       let _: Option<_> = try {
-        set.insert((split.next()?.to_string(), split.next()?.to_string(), split.next()?.parse::<i32>().unwrap()));
+        set.insert((split.next()?.to_string(), split.next()?.parse::<u64>().ok()?, split.next()?.parse::<usize>().ok()?));
       };
     }
   }
@@ -250,9 +250,9 @@ async fn main() {
           continue;
         }
 
-        let id = result["legacy"]["id_str"].as_str()
+        let snowflake = result["legacy"]["id_str"].as_str()
           .or(result["tweet"]["legacy"]["id_str"].as_str())
-          .unwrap_or_else(|| output_malform_json(&json, "likes")).to_string();
+          .unwrap_or_else(|| output_malform_json(&json, "likes")).to_string().parse::<u64>().unwrap();
 
         let username = result["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str()
           .or(result["tweet"]["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str())
@@ -262,9 +262,9 @@ async fn main() {
         let media = temp.as_array();
 
         if let Some(media) = media {
-          let mut media_index = 1;
-          for item in media {
-            if set.contains(&(username.clone(), id.clone(), media_index)) {
+          for (media_index, item) in media.iter().enumerate() {
+            let media_index = media_index + 1;
+            if set.contains(&(username.clone(), snowflake, media_index)) {
               continue;
             }
             media_pb.inc_length(1);
@@ -285,14 +285,13 @@ async fn main() {
               }
               _ => panic!("Unknown media type {}.", media_type)
             };
-            let id = id.clone();
             let username = username.clone();
             let dir = dir.clone();
             let sem = sem.clone();
             let client = media_client.clone();
             let media_pb = media_pb.clone();
             tokio::spawn(async move {
-              media_pb.set_message(format!("http://x.com/{username}/status/{id}"));
+              media_pb.set_message(format!("http://x.com/{username}/status/{snowflake}/photo/{media_index}"));
               let _permit = sem.acquire().await.unwrap();
               'retry: loop {
                 let mut stream = loop {
@@ -308,7 +307,7 @@ async fn main() {
                     }
                   }
                 };
-                let file_name = format!("{username} {id} {media_index}.{ext}");
+                let file_name = format!("{username} {snowflake} {media_index}.{ext}");
                 let path = Path::new(&dir).join(&file_name);
                 if let Ok(mut file) = File::create(&path).await {
                   while let Some(item) = stream.next().await {
@@ -325,7 +324,6 @@ async fn main() {
                 break;
               }
             });
-            media_index += 1;
           }
         }
         total_pb.inc(1);
