@@ -188,25 +188,25 @@ async fn main() {
       ("fieldToggles", "{\"withAuxiliaryUserLabels\":false}")
     ];
 
-    let res = loop {
-      if let Ok(res) = xhr_client.get("https://x.com/i/api/graphql/Yka-W8dz7RaEuQNkroPkYw/UserByScreenName")
-        .query(&query)
-        .send().await {
-          break res;
-      } else {
-        println!("Warning: 429 or network err.")
-      }
-    };
-
-    match res.json::<Value>().await {
-      Ok(json) => {
-        let result = &json["data"]["user"]["result"];
-        let user_id = result["rest_id"].as_str().unwrap_or_else(|| output_malform_json(&json, "likes")).to_owned();
-        let fav_count = result["legacy"]["favourites_count"].as_u64().unwrap_or_else(|| output_malform_json(&json, "likes"));
-        (user_id, fav_count)
-      }
-      Err(err) => {
-        panic!("Unknown error {:?}", err);
+    loop {
+      match async { 
+        xhr_client.get("https://x.com/i/api/graphql/Yka-W8dz7RaEuQNkroPkYw/UserByScreenName")
+          .query(&query)
+          .send().await?.error_for_status()?.json::<Value>().await
+      }.await {
+        Ok(json) => {
+          let result = &json["data"]["user"]["result"];
+          let user_id = result["rest_id"].as_str().unwrap_or_else(|| output_malform_json(&json, "likes")).to_owned();
+          let fav_count = result["legacy"]["favourites_count"].as_u64().unwrap_or_else(|| output_malform_json(&json, "likes"));
+          break (user_id, fav_count);
+        },
+        Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
+          println!("Warning: too many request, sleep 5 secs and retrying...");
+          time::sleep(FIVE_SECOUND).await;
+        }
+        Err(err) => {
+          println!("Unknown request error {:?}, retrying...", err);
+        }
       }
     }
   };
@@ -220,22 +220,27 @@ async fn main() {
   loop {
     let new_cursor: String;
 
-    let res = loop {
+    let json = loop {
       let query = [
         ("variables", &tweet_variables(&user_id, &cursor, page_size)),
         ("features", &*TWEET_FEATURE)
       ];
-
-      if let Ok(res) = xhr_client.get("https://api.twitter.com/graphql/QK8AVO3RpcnbLPKXLAiVog/Likes")
-      .query(&query)
-      .send().await {
-        break res;
-      } else {
-        println!("Warning: 429 or network err.")
+      
+      match async { 
+        xhr_client.get("https://api.twitter.com/graphql/QK8AVO3RpcnbLPKXLAiVog/Likes")
+          .query(&query)
+          .send().await?.error_for_status()?.json::<Value>().await
+      }.await {
+        Ok(json) => break json,
+        Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
+          println!("Warning: too many request, sleep 5 secs and retrying...");
+          time::sleep(FIVE_SECOUND).await;
+        }
+        Err(err) => {
+          println!("Unknown request error {:?}, retrying...", err);
+        }
       }
     };
-
-    let json: Value = res.json().await.unwrap();
 
     let timeline = json["data"]["user"]["result"].get("timeline")
       .or(json["data"]["user"]["result"].get("timeline_v2"))
@@ -291,12 +296,11 @@ async fn main() {
             let client = media_client.clone();
             let media_pb = media_pb.clone();
             tokio::spawn(async move {
-              media_pb.set_message(format!("http://x.com/{username}/status/{snowflake}/photo/{media_index}"));
               let _permit = sem.acquire().await.unwrap();
               'retry: loop {
                 let mut stream = loop {
-                  let result = client.get(&url).send().await;
-                  match result {
+                  media_pb.set_message(format!("http://x.com/{username}/status/{snowflake}/photo/{media_index}"));
+                  match client.get(&url).send().await.and_then(|r| r.error_for_status()){
                     Ok(res) => break res.bytes_stream(),
                     Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
                       println!("Warning: too many request, sleep 5 secs and retrying...");
