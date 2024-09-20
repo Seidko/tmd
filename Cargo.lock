@@ -95,6 +95,7 @@ name = "async-native-tls"
 version = "0.5.0"
 source = "git+https://github.com/Seidko/async-native-tls.git?branch=unlock-deps#df9720235e164ff2407e69e04d667007661f7d0b"
 dependencies = [
+ "futures-lite",
  "futures-util",
  "native-tls",
  "thiserror",

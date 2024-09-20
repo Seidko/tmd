@@ -1,4 +1,6 @@
-use std::{collections::HashMap, error::Error, fmt::Debug};
+use std::{collections::HashMap, error::Error, fmt::Debug, os::unix::net::SocketAddr};
+use async_native_tls::TlsConnector;
+use smol::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
 use url::Url;
 
 pub enum Method {
@@ -30,7 +32,7 @@ where
 pub struct Response {
   request: Request<Url, Url>,
   headers: HashMap<String, String>,
-  body: Vec<u8>,
+  stream
 
 }
 
@@ -89,6 +91,29 @@ where
       Some(Err(err)) => return Err(err.into()),
       _ => None,
     };
+
+    let host = url.host().ok_or("No host field in url.")?;
+    let port = url.host().ok_or("No port field in url.")?;
+
+    let stream = match proxy {
+      None => TcpStream::connect(SocketAddr::from((host, port))),
+      Some(p) if p.scheme() == "http" => async {
+        let stream = TcpStream::connect(SocketAddr::from((
+          p.host().ok_or("No host field in proxy url.")?,
+          p.port().ok_or("No port field in proxy url.")?,
+        ))).await?;
+        let mut buf = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n").into_bytes();
+        buf.extend_from_slice(b"\r\n");
+
+        stream.write_all(&buf).await?;
+
+        let mut buf = [0u8; 32768];
+        stream.read(&buf);
+      },
+      _ => Err("Unsupport proxy scheme.")
+    }.await?;
+
+    match 
 
     Ok(Response {
       request: Request {
