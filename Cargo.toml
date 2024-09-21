@@ -9,5 +9,5 @@ serde_json = { version = "1.0" }
 sysproxy = { git = "https://github.com/Seidko/sysproxy-rs.git" }
 indicatif = "0.17"
 smol = "2.0.2"
-async-native-tls = { git = "https://github.com/Seidko/async-native-tls.git", branch = "unlock-deps", features = ["runtime-smol"] }
+async-native-tls = { git = "https://github.com/Seidko/async-native-tls.git", branch = "unlock-deps", default-features = false, features = ["runtime-smol"] }
 url = "2.5.2"

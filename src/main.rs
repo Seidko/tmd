@@ -1,4 +1,4 @@
-#![feature(try_blocks, type_changing_struct_update)]
+#![feature(try_blocks, type_changing_struct_update, let_chains, negative_impls)]
 mod simp_h1;
 
 use std::{collections::HashSet, env, panic, path::Path, sync::{Arc, LazyLock}, time::Duration};
