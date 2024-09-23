@@ -1,12 +1,21 @@
-use std::{any::Any, collections::HashMap, error::Error, fmt::{Debug, Display}, net::SocketAddr, pin::Pin};
-use async_native_tls::TlsConnector;
-use serde::Deserialize;
-use smol::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, net::{AsyncToSocketAddrs, TcpStream}, stream::StreamExt};
+use std::any::Any;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::{Debug, Display};
+use std::pin::Pin;
+use async_native_tls::{TlsConnector, TlsStream};
+use smol::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use smol::net::TcpStream;
 use url::Url;
 
 use crate::subseq::SubSequence;
 
 const PROTOCOL: [&[u8]; 2] = [b"HTTP/1.0 200", b"HTTP/1.1 200"];
+
+trait AsyncRW: AsyncRead + AsyncWrite {}
+
+impl AsyncRW for TcpStream {}
+impl AsyncRW for TlsStream<TcpStream> {}
 
 pub enum Method {
   GET,
@@ -52,23 +61,29 @@ pub struct Response {
   headers: HashMap<String, String>,
   body: Vec<u8>,
   code: u16,
-  stream: TcpStream
+  stream: Pin<Box<dyn AsyncRW>>
 }
 
 #[derive(Debug)]
 pub enum HttpError {
   UrlError(url::ParseError),
   IOError(smol::io::Error),
+  TlsError(async_native_tls::Error),
   GeneralError(String),
   UnknownError(Box<dyn Any>),
 }
 
 impl From<Box<dyn Any>> for HttpError {
   fn from(value: Box<dyn Any>) -> Self {
+    use HttpError::*;
     let value = value.downcast::<url::ParseError>();
     if let Ok(err) = value {
-      return HttpError::UrlError(*err);
+      return UrlError(*err);
     };
+    let value = value.unwrap_err().downcast::<&str>();
+    if let Ok(err) = value {
+      return GeneralError(err.to_string());
+    }
     HttpError::UnknownError(value.unwrap_err())
   } 
 }
@@ -82,6 +97,12 @@ impl From<url::ParseError> for HttpError {
 impl From<smol::io::Error> for HttpError {
   fn from(value: smol::io::Error) -> Self {
     HttpError::IOError(value)
+  }
+}
+
+impl From<async_native_tls::Error> for HttpError {
+  fn from(value: async_native_tls::Error) -> Self {
+    HttpError::TlsError(value)
   }
 }
 
@@ -115,8 +136,8 @@ async fn tunnel(proxy: &Option<Url>, host: &str, port: u16) -> Result<TcpStream,
         }
 
         rec.extend_from_slice(&buf[..size]);
-        
-        if let Some(end) = rec.first_chunk() && PROTOCOL.contains(&end) {
+
+        if let Some(end) = rec.first_chunk::<12>() && PROTOCOL.contains(&end.as_slice()) {
           if rec.ends_with(b"\r\n\r\n") {
             break Ok(stream);
           }
@@ -135,11 +156,13 @@ async fn tunnel(proxy: &Option<Url>, host: &str, port: u16) -> Result<TcpStream,
 
 impl Display for HttpError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    use HttpError::*;
     match self {
-      Self::UrlError(e) => write!(f, "{}", e),
-      Self::IOError(e) => write!(f, "{}", e),
-      Self::GeneralError(e) => write!(f, "{}", e),
-      Self::UnknownError(_) => write!(f, "Unknown Error"),
+      UrlError(e) => write!(f, "{}", e),
+      IOError(e) => write!(f, "{}", e),
+      TlsError(e) => write!(f, "{}", e),
+      GeneralError(e) => write!(f, "{}", e),
+      UnknownError(_) => write!(f, "Unknown Error"),
     }
   }
 }
@@ -194,7 +217,7 @@ where
     self.body = body.into();
   }
 
-  async fn send(self) -> Result<Response, HttpError> {
+  async fn send<T>(self) -> Result<Response, HttpError> {
     let url: Url = self.url.try_into().map_err(|e| Box::new(e) as Box<dyn Any>)?;
     let proxy: Option<Url> = match self.proxy.map(TryInto::try_into) {
       Some(Ok(url)) => Some(url),
@@ -205,7 +228,16 @@ where
     let host = url.host_str().ok_or("No host field in url.")?;
     let port = url.port().ok_or("No port field in url.")?;
 
-    let mut stream: TcpStream = tunnel(&proxy, host, port).await?;
+    let mut stream: Pin<Box<dyn AsyncRW>> = {
+      let stream: TcpStream = tunnel(&proxy, host, port).await?;
+
+      if url.scheme() == "https" {
+        let conn = TlsConnector::new();
+        Box::pin(conn.connect(host, stream).await?)
+      } else {
+        Box::pin(stream)
+      }
+    };
 
     let mut buf = format!(
       "{} {}{} HTTP/1.1\r\n{}",
@@ -230,7 +262,7 @@ where
     let pos = loop {
       let size = stream.read(&mut buf).await?;
       if size == 0 {
-        Err("connection receive EOF.".into())?;
+        return Err("connection receive EOF.".into());
       };
       
       rec.extend_from_slice(&buf[..size]);
@@ -238,34 +270,42 @@ where
         break pos;
       }
     };
-    let header_lines = String::from_utf8_lossy(&rec[..pos]).split("\r\n");
-    let first_line = header_lines.next().ok_or(Err("Malform HTTP response header").into())?.split(" ");
+
+    let header = String::from_utf8_lossy(&rec[..pos]);
+    let mut header_lines = header.split("\r\n");
+    let mut first_line = header_lines.next().ok_or("Malform HTTP response header")?.split(" ");
 
     macro_rules! lnext {
       ($v:expr) => {
-        $v.next().ok_or(Err("Malform HTTP response header").into())?
+        $v.next().ok_or("Malform HTTP response header")?
       };
     }
 
+
     let ptc = lnext!(first_line);
-    let code = lnext!(first_line);
+    let code = lnext!(first_line).parse().map_err(|_| "Malform HTTP status code")?;
 
     if !PROTOCOL.contains(&ptc.as_bytes()) {
       Err("Unsupported protocol or protocol version.")?;
     }
     
-    let headers = HashMap::new();
+    let mut headers = HashMap::new();
     for line in header_lines {
-      let split = line.split(":");
+      let mut split = line.split(":");
       let k = lnext!(split).to_lowercase();
       let v = lnext!(split).to_lowercase();
       headers.insert(k, v);
     }
 
     let body = if let Some(len) = headers.get("content-length") {
-      let len: usize = len.parse().or_else(|_| Err("`content-length` field is not number.".into()))?;
+      let mut rest = Vec::from(&rec[pos + 4..]);
+      let len = len.parse::<usize>().map_err(|_| "`content-length` field is not number.")? - rest.len();
+      let mut buf = vec![0u8; len];
+      stream.read_exact(&mut buf);
+      rest.append(&mut buf);
+      rest
     } else {
-      Err("cannot recogize body length head.".into())?;
+      return Err("cannot recogize body length head.".into());
     };
 
     Ok(Response {
@@ -276,6 +316,8 @@ where
       },
       headers,
       stream,
+      body,
+      code,
     })
   }
 }
