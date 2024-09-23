@@ -1,6 +1,6 @@
-use std::{any::Any, collections::HashMap, error::Error, fmt::{Debug, Display}, net::SocketAddr};
+use std::{any::Any, collections::HashMap, error::Error, fmt::{Debug, Display}, net::SocketAddr, pin::Pin};
 use async_native_tls::TlsConnector;
-use smol::{io::{AsyncReadExt, AsyncWriteExt}, net::{AsyncToSocketAddrs, TcpStream}, stream::StreamExt};
+use smol::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, net::{AsyncToSocketAddrs, TcpStream}, stream::StreamExt};
 use url::Url;
 
 pub enum Method {
@@ -47,15 +47,15 @@ where
 
 pub struct Response {
   request: Request<Url, Url>,
-  headers: HashMap<String, String>,
-  // stream: 
+  headers: Option<HashMap<String, String>>,
+  stream: TcpStream,
 }
 
 #[derive(Debug)]
 pub enum HttpError {
   UrlError(url::ParseError),
   IOError(smol::io::Error),
-  TunnelError(String),
+  GeneralError(String),
   UnknownError(Box<dyn Any>),
 }
 
@@ -81,13 +81,13 @@ impl From<smol::io::Error> for HttpError {
   }
 }
 
-impl From<&str> for  HttpError {
+impl From<&str> for HttpError {
   fn from(value: &str) -> Self {
-    HttpError::TunnelError(value.to_owned())
+    HttpError::GeneralError(value.to_owned())
   }
 }
 
-async fn tunnel(proxy: Option<Url>, host: &str, port: u16) -> Result<TcpStream, HttpError> {
+async fn tunnel(proxy: &Option<Url>, host: &str, port: u16) -> Result<TcpStream, HttpError> {
   let tun = match proxy {
     None => TcpStream::connect((host, port)).await?,
     Some(p) if p.scheme() == "http" => {
@@ -100,28 +100,30 @@ async fn tunnel(proxy: Option<Url>, host: &str, port: u16) -> Result<TcpStream, 
 
       stream.write_all(&buf).await?;
 
-      let mut buf = Vec::with_capacity(8192);
+      let mut rec = Vec::with_capacity(8192);
 
-      let mut result = None;
-      loop {
-        stream.read(buf)
-      }
-      while let Some(byte) = iter.next().await {
-        let byte = byte?;
-        buf.push(byte);
-        if buf.len() >= 12 {
-          if [b"HTTP/1.0 200", b"HTTP/1.1 200"].contains(&buf.first_chunk().unwrap()) {
-            if buf.ends_with(b"\r\n\r\n") {
-              return Ok(iter);
-            }
-          } else if buf.starts_with(b"HTTP/1.1 407") {
-            result = Some(Err("proxy authentication required"));
-          } else {
-            result = Some(Err("unsuccessful tunnel"));
+      let mut buf = [0u8; 1460];
+
+      let tun: Result<TcpStream, HttpError> = loop {
+        let size = stream.read(&mut buf).await?;
+
+        if size == 0 {
+          break Err("tunnel EOF.".into());
+        }
+
+        rec.extend_from_slice(&buf[..size]);
+        
+        if let Some(end) = rec.first_chunk() && [b"HTTP/1.0 200", b"HTTP/1.1 200"].contains(&end) {
+          if buf.ends_with(b"\r\n\r\n") {
+            break Ok(stream);
           }
+        } else if buf.starts_with(b"HTTP/1.1 407") {
+          break Err("proxy authentication required".into());
+        } else {
+          break Err("unsuccessful tunnel".into());
         }
       };
-      result.unwrap_or(Err("tunnel EOF."))?
+      tun?
     },
     _ => Err("Unsupport proxy scheme.")?
   };
@@ -133,7 +135,7 @@ impl Display for HttpError {
     match self {
       Self::UrlError(e) => write!(f, "{}", e),
       Self::IOError(e) => write!(f, "{}", e),
-      Self::TunnelError(e) => write!(f, "{}", e),
+      Self::GeneralError(e) => write!(f, "{}", e),
       Self::UnknownError(_) => write!(f, "Unknown Error"),
     }
   }
@@ -145,6 +147,8 @@ impl<U, P> Request<U, P>
 where
   U: TryInto<Url>,
   P: TryInto<Url>,
+  U::Error: Error + 'static,
+  P::Error: Error + 'static,
 {
   fn url<V>(self, url: V) -> Request<V, P>
   where
@@ -198,9 +202,24 @@ where
     let host = url.host_str().ok_or("No host field in url.")?;
     let port = url.port().ok_or("No port field in url.")?;
 
-    let tunnel: TcpStream = tunnel(proxy, host, port).await?;
+    let mut stream: TcpStream = tunnel(&proxy, host, port).await?;
 
-    let mut buf = b""
+    let mut buf = format!(
+      "{} {}{} HTTP/1.1\r\n{}",
+      self.method,
+      url.path(),
+      url.query().map(|s| "?".to_owned() + s).unwrap_or(String::new()),
+      self.headers.iter().map(|(k, v)| k.to_owned() + ":" + &v + "\r\n").collect::<String>(),
+    ).into_bytes();
+
+    use Method::*;
+    match self.method {
+      GET | HEAD | OPTIONS | DELETE | TRACE | CONNECT => {
+        buf.extend_from_slice(b"\r\n");
+        stream.write(&buf).await?;
+      }
+      _ => unimplemented!("Unsupport Method {}", self.method),
+    }
 
     Ok(Response {
       request: Request {
@@ -208,6 +227,8 @@ where
         proxy,
         ..self
       },
+      headers: None,
+      stream,
     })
   }
 }
