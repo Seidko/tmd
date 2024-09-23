@@ -1,7 +1,12 @@
 use std::{any::Any, collections::HashMap, error::Error, fmt::{Debug, Display}, net::SocketAddr, pin::Pin};
 use async_native_tls::TlsConnector;
+use serde::Deserialize;
 use smol::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, net::{AsyncToSocketAddrs, TcpStream}, stream::StreamExt};
 use url::Url;
+
+use crate::subseq::SubSequence;
+
+const PROTOCOL: [&[u8]; 2] = [b"HTTP/1.0 200", b"HTTP/1.1 200"];
 
 pub enum Method {
   GET,
@@ -34,9 +39,6 @@ impl Display for Method {
 }
 
 pub struct Request<U, P>
-where
-  U: TryInto<Url>,
-  P: TryInto<Url>,
 {
   method: Method,
   url: U,
@@ -47,8 +49,10 @@ where
 
 pub struct Response {
   request: Request<Url, Url>,
-  headers: Option<HashMap<String, String>>,
-  stream: TcpStream,
+  headers: HashMap<String, String>,
+  body: Vec<u8>,
+  code: u16,
+  stream: TcpStream
 }
 
 #[derive(Debug)]
@@ -101,7 +105,6 @@ async fn tunnel(proxy: &Option<Url>, host: &str, port: u16) -> Result<TcpStream,
       stream.write_all(&buf).await?;
 
       let mut rec = Vec::with_capacity(8192);
-
       let mut buf = [0u8; 1460];
 
       let tun: Result<TcpStream, HttpError> = loop {
@@ -113,8 +116,8 @@ async fn tunnel(proxy: &Option<Url>, host: &str, port: u16) -> Result<TcpStream,
 
         rec.extend_from_slice(&buf[..size]);
         
-        if let Some(end) = rec.first_chunk() && [b"HTTP/1.0 200", b"HTTP/1.1 200"].contains(&end) {
-          if buf.ends_with(b"\r\n\r\n") {
+        if let Some(end) = rec.first_chunk() && PROTOCOL.contains(&end) {
+          if rec.ends_with(b"\r\n\r\n") {
             break Ok(stream);
           }
         } else if buf.starts_with(b"HTTP/1.1 407") {
@@ -221,13 +224,57 @@ where
       _ => unimplemented!("Unsupport Method {}", self.method),
     }
 
+    let mut rec = Vec::with_capacity(8192);
+    let mut buf = [0u8; 1460];
+
+    let pos = loop {
+      let size = stream.read(&mut buf).await?;
+      if size == 0 {
+        Err("connection receive EOF.".into())?;
+      };
+      
+      rec.extend_from_slice(&buf[..size]);
+      if let Some(pos) = rec.find_slice(b"\r\n\r\n") {
+        break pos;
+      }
+    };
+    let header_lines = String::from_utf8_lossy(&rec[..pos]).split("\r\n");
+    let first_line = header_lines.next().ok_or(Err("Malform HTTP response header").into())?.split(" ");
+
+    macro_rules! lnext {
+      ($v:expr) => {
+        $v.next().ok_or(Err("Malform HTTP response header").into())?
+      };
+    }
+
+    let ptc = lnext!(first_line);
+    let code = lnext!(first_line);
+
+    if !PROTOCOL.contains(&ptc.as_bytes()) {
+      Err("Unsupported protocol or protocol version.")?;
+    }
+    
+    let headers = HashMap::new();
+    for line in header_lines {
+      let split = line.split(":");
+      let k = lnext!(split).to_lowercase();
+      let v = lnext!(split).to_lowercase();
+      headers.insert(k, v);
+    }
+
+    let body = if let Some(len) = headers.get("content-length") {
+      let len: usize = len.parse().or_else(|_| Err("`content-length` field is not number.".into()))?;
+    } else {
+      Err("cannot recogize body length head.".into())?;
+    };
+
     Ok(Response {
       request: Request {
         url,
         proxy,
         ..self
       },
-      headers: None,
+      headers,
       stream,
     })
   }
