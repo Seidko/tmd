@@ -18,8 +18,11 @@ Find these value and fill it in `config.json` under the same path with executabl
     "concurrency": 50, // the maximum concurrent amount, default is 50
     "page_size": 100, // post count in single request, default is 100
     "path": "./media", // the path name will media were downloaded, default is "./media"
-    "proxy": "" // proxy will programme follow, default is your system proxy
+    "proxy": "", // proxy will programme follow, default is your system proxy
 
+    // debug config
+    "pause_on_end": false, // pause program on complete
+    "pause_on_panic": false, // pause program on panic, this config will force enable `RUST_BACKTRACE`
     // remember remove these comments
 }
 ```
