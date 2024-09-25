@@ -11,9 +11,6 @@ on:
 
 jobs:
   build-release:
-    concurrency:
-      group: build-release
-      cancel-in-progress: true
     strategy:
       matrix:
         include:
@@ -23,6 +20,10 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+
+    concurrency:
+      group: build-release-${{ matrix.target }}
+      cancel-in-progress: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
