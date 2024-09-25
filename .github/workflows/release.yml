@@ -6,7 +6,6 @@ permissions:
 on:
   release:
     types:
-      - created
       - published
 
 jobs:
