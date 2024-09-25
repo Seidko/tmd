@@ -11,8 +11,9 @@ on:
 
 jobs:
   build-release:
-    group: build-release
-    cancel-in-progress: true
+    concurrency:
+      group: build-release
+      cancel-in-progress: true
     strategy:
       matrix:
         include:
