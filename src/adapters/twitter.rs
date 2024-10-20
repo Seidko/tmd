@@ -78,10 +78,12 @@ struct TwitterConfig {
   csrf_token: String,
   page_size: Option<i32>,
   concurrency: Option<usize>,
+  path: Option<String>,
 }
 
 pub struct TwitterAdapter {
   pub username: String,
+  pub path: String,
   userid: OnceLock<String>,
   cursor: Value,
   xhr: Client,
@@ -133,6 +135,7 @@ impl TwitterAdapter {
     Self {
       username: config.user_name,
       page_size: config.page_size.unwrap_or(100),
+      path: config.path.unwrap_or("./twitter".to_owned()),
       cursor: Value::Null,
       userid: OnceLock::new(),
       cache: LinkedList::new(),
@@ -186,6 +189,10 @@ impl Adapters for TwitterAdapter {
 
   fn name(&self) -> &str {
     &self.username
+  }
+
+  fn path(&self) -> &str {
+    &self.path
   }
 
   fn next(&mut self) -> BoxedFuture<'_, Option<Box<dyn Item>>> {

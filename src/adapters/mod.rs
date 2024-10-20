@@ -11,6 +11,7 @@ pub const BEARER: &'static str = "Bearer ";
 
 pub trait Adapters: Send + Sync {
   fn platform(&self) -> &'static str;
+  fn path(&self) -> &str;
   fn name(&self) -> &str;
   fn next(&mut self) -> BoxedFuture<'_, Option<Box<dyn Item>>>;
 }

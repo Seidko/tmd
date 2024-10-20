@@ -13,6 +13,7 @@ struct BlueSkyConfig {
   pass: String,
   page_size: Option<i32>,
   concurrency: Option<usize>,
+  path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -22,6 +23,7 @@ struct GetActorLikes {
 }
 
 pub struct BlueSkyAdapter {
+  path: String,
   account: String,
   pass: String,
   auth: OnceLock<Auth>,
@@ -65,6 +67,7 @@ impl BlueSkyAdapter {
       page_size: config.page_size.unwrap_or(50),
       account: config.account,
       pass: config.pass,
+      path: config.path.unwrap_or("./bluesky".to_owned()),
       auth: OnceLock::new(),
       cache: LinkedList::new(),
       sem: Arc::new(Semaphore::new(config.concurrency.unwrap_or(50))),
@@ -81,6 +84,10 @@ impl Adapters for BlueSkyAdapter {
 
   fn name(&self) -> &str {
     &self.account
+  }
+
+  fn path(&self) -> &str {
+    &self.path
   }
 
   #[inline(never)]

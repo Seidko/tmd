@@ -25,7 +25,6 @@ fn pause() {
 struct Config {
   accounts: Vec<Value>,
   proxy: Option<String>,
-  path: Option<String>,
   pause_on_end: Option<bool>,
   pause_on_panic: Option<bool>,
 }
@@ -50,17 +49,6 @@ async fn main() {
   .unwrap()
   .progress_chars("##-");
 
-  let dir = config.path.clone().unwrap_or("./media".to_string());
-
-  let mut set = HashSet::<String>::new();
-  if let Ok(paths) = std::fs::read_dir(&dir) {
-    for entry in paths {
-      let path = entry.unwrap().path();
-      set.insert(path.file_name().unwrap().to_str().unwrap().to_string());
-    }
-  }
-  let set = Arc::new(set);
-
   let proxy: Option<Proxy> = config.proxy.clone().or_else(|| {
     let sysproxy = Sysproxy::get_system_proxy().ok()?;
     if !sysproxy.enable {
@@ -70,21 +58,30 @@ async fn main() {
   }).map(|s| Proxy::all(s).unwrap());
 
   let accounts: Vec<_> = config.accounts.clone().into_iter().map(|v| {
-    match v.get("platform").and_then(|v| v.as_str()) {
+    let account = match v.get("platform").and_then(|v| v.as_str()) {
       Some(_p @ "twitter" | _p @ "x") => Box::new(TwitterAdapter::new(v, proxy.clone())) as Box<dyn Adapters + Send>,
       Some(_p @ "bluesky" | _p @ "bsky") => Box::new(BlueSkyAdapter::new(v, proxy.clone())),
       Some(_) => panic!(),
       None => panic!()
+    };
+
+    let mut set = HashSet::<String>::new();
+    if let Ok(paths) = std::fs::read_dir(account.path()) {
+      for entry in paths {
+        let path = entry.unwrap().path();
+        set.insert(path.file_name().unwrap().to_str().unwrap().to_string());
+      }
     }
+    let set = Arc::new(set);
+    let _ = fs::create_dir(account.path());
+    (account, set)
   }).collect();
 
-  let _ = fs::create_dir(&dir);
   let (fsx, mut frx) = unbounded_channel::<JoinHandle<()>>();
   let pbs = Arc::new(Mutex::new(Vec::<ProgressBar>::new()));
 
-  for mut account in accounts.into_iter() {
+  for (mut account, set) in accounts.into_iter() {
     let set = set.clone();
-    let dir = dir.clone();
     let mprogress = mprogress.clone();
     let style = style.clone();
     let fsx2 = fsx.clone();
@@ -102,10 +99,9 @@ async fn main() {
           continue;
         }
         let pb = pb.clone();
-        let dir = dir.clone();
+        let dir = account.path().to_owned();
         fsx2.send(tokio::spawn(async move {
           pb.set_message(item.url().to_owned());
-
           let path = Path::new(&dir).join(item.filename());
           match async {
             let mut file = File::create(&path).await?;
