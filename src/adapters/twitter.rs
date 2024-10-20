@@ -5,7 +5,8 @@ use bytes::Bytes;
 use reqwest::{Client, Proxy, StatusCode};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
-use serde_json::{from_value, json, Value};
+use serde_json::{from_value, json, to_string_pretty, Value};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use crate::insert;
@@ -192,8 +193,6 @@ impl Adapters for TwitterAdapter {
       if let Some(item) = self.cache.pop_front() {
         return Some(Box::new(item) as Box<dyn Item>);
       }
-
-      let new_cursor: String;
       
       if self.userid.get().is_none() {
         self.init().await;
@@ -220,45 +219,45 @@ impl Adapters for TwitterAdapter {
         }
       };
 
-      let timeline = json["data"]["user"]["result"].get("timeline")
-        .or(json["data"]["user"]["result"].get("timeline_v2"))
-        .unwrap();
-
-      if let serde_json::Value::Array(likes) = &timeline["timeline"]["instructions"][0]["entries"] {
-        new_cursor = likes.last().unwrap()["content"]["value"].as_str().unwrap().to_owned();
+      let is_error: Option<()> = try {
+        let timeline = json["data"]["user"]["result"].get("timeline")
+          .or(json["data"]["user"]["result"].get("timeline_v2"))?;
+    
+        let likes = timeline["timeline"]["instructions"][0]["entries"].as_array()?;
+        let new_cursor = likes.last()?["content"]["value"].as_str()?.to_owned();
         for item in likes {
           let result = &item["content"]["itemContent"]["tweet_results"]["result"];
           if result.is_null() {
             continue;
           }
-
+    
           let snowflake = result["legacy"]["id_str"].as_str()
             .or(result["tweet"]["legacy"]["id_str"].as_str())
-            .unwrap().to_owned().parse::<u64>().unwrap();
-
+            ?.to_owned().parse::<u64>().ok()?;
+    
           let username = result["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str()
             .or(result["tweet"]["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str())
-            .unwrap().to_owned();
-
+            ?.to_owned();
+    
           let temp = &result["legacy"]["entities"]["media"];
           let media = temp.as_array();
-
+    
           if let Some(media) = media {
             for (media_index, item) in media.iter().enumerate() {
               let media_index = media_index + 1;
-              let media_type = item["type"].as_str().unwrap();
+              let media_type = item["type"].as_str()?;
               let (media_url, ext) = match media_type {
                 "photo" => {
-                  let media_url_https = item["media_url_https"].as_str().unwrap().to_owned();
+                  let media_url_https = item["media_url_https"].as_str()?.to_owned();
                   let url = media_url_https.clone() + "?name=orig";
                   let ext = Path::new(media_url_https.as_str()).extension().unwrap().to_str().unwrap().to_owned();
                   (url, ext)
                 }
                 "animated_gif" | "video" => {
                   let media_url_https = item["video_info"]["variants"]
-                    .as_array().unwrap()
-                    .last().unwrap()["url"]
-                    .as_str().unwrap().to_owned();
+                    .as_array()?
+                    .last()?["url"]
+                    .as_str()?.to_owned();
                   (media_url_https, "mp4".to_owned())
                 }
                 _ => panic!("Unknown media type {}.", media_type)
@@ -278,17 +277,22 @@ impl Adapters for TwitterAdapter {
             }
           }
         }
+    
+        if new_cursor == self.cursor {
+          return None;
+        }
+    
+        self.cursor = Value::String(new_cursor);
+    
+        return self.cache.pop_front().map(|v| Box::new(v) as Box<dyn Item>);
+      };
+      if is_error.is_none() {
+        let mut file = tokio::fs::File::create("./twitter_sample.json").await.unwrap();
+        file.write(to_string_pretty(&json).unwrap().as_bytes()).await.unwrap();
+        panic!("Error: malform json");
       } else {
-        panic!("Data may be Null, please check your user name.")
+        panic!("Undefined behavior.");
       }
-
-      if new_cursor == self.cursor {
-        return None;
-      }
-
-      self.cursor = Value::String(new_cursor);
-
-      self.cache.pop_front().map(|v| Box::new(v) as Box<dyn Item>)
     };
     Box::pin(futures)
   }
