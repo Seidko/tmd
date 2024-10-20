@@ -96,10 +96,11 @@ async fn main() {
       pbs.lock().unwrap().push(pb.clone());
 
       while let Some(item) = account.next().await {
+        pb.inc_length(1);
         if set.contains(item.filename()) {
+          pb.inc(1);
           continue;
         }
-        pb.inc_length(1);
         let pb = pb.clone();
         let dir = dir.clone();
         fsx2.send(tokio::spawn(async move {
