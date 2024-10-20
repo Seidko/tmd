@@ -1,12 +1,16 @@
 # Twitter media downloader
-Download media in your twitter likes.
+Download media in your social media likes. Now support Twitter and Bluesky.
 ### How to configurate
 
+#### Twitter
 Open `x.com/[your account]/likes`, open devtools and search url like `https://x.com/i/api/graphql/*/Likes`
 
-Find these value and fill it in `config.json` under the same path with executable.
+Find value and fill it in `config.json` under the same path with executable.
 
-`config.json`
+#### BlueSky
+Just need your accounts and password.
+
+#### `config.json` sample
 ```json5
 {
     // required config
