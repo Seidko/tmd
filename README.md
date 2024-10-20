@@ -9,14 +9,33 @@ Find these value and fill it in `config.json` under the same path with executabl
 `config.json`
 ```json5
 {
-    "user_name": "", // your user name
-    "authorization": "", // in header, `authorization`
-    "cookies": "", // in header, `cookies`
-    "csrf_token": "", // in header, `x-csrf-token`
+    // required config
+    "accounts": [
+        {
+            // required config
+            "platform": "twitter", // or "x"
+            "user_name": "", // your user name
+            "authorization": "", // in header, `authorization`
+            "cookies": "", // in header, `cookies`
+            "csrf_token": "", // in header, `x-csrf-token`
+
+            // optional config
+            "concurrency": 50, // the maximum concurrent amount, default is 50
+            "page_size": 100, // post count in single request, default is 100
+        },
+        {
+            // required config
+            "platform": "bluesky", // or "bsky"
+            "account": "", // your handle or email
+            "pass": "", // your password
+            
+            // optional config
+            "concurrency": 50, // the maximum concurrent amount, default is 50
+            "page_size": 50, // post count in single request, default is 50
+        }
+    ],
 
     // optional config
-    "concurrency": 50, // the maximum concurrent amount, default is 50
-    "page_size": 100, // post count in single request, default is 100
     "path": "./media", // the path name will media were downloaded, default is "./media"
     "proxy": "", // proxy will programme follow, default is your system proxy
 
