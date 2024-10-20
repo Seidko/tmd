@@ -1,9 +1,9 @@
-use std::{collections::LinkedList, sync::OnceLock};
+use std::{collections::LinkedList, sync::{Arc, OnceLock}};
 
 use reqwest::{Client, Proxy, StatusCode};
 use serde::Deserialize;
 use serde_json::{from_value, json, Value};
-use tokio::time::sleep;
+use tokio::{sync::Semaphore, time::sleep};
 
 use super::{Adapters, BoxedFuture, Item, BEARER, USER_AGENT, FIVE_SECOUND};
 
@@ -12,6 +12,7 @@ struct BlueSkyConfig {
   account: String,
   pass: String,
   page_size: Option<i32>,
+  concurrency: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -28,6 +29,7 @@ pub struct BlueSkyAdapter {
   cursor: Option<String>,
   page_size: i32,
   client: Client,
+  sem: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
@@ -42,6 +44,7 @@ pub struct BlueSkyItem {
   pub media_url: String,
   pub client: Client,
   pub filename: String,
+  sem: Arc<Semaphore>,
 }
 
 impl BlueSkyAdapter {
@@ -64,6 +67,7 @@ impl BlueSkyAdapter {
       pass: config.pass,
       auth: OnceLock::new(),
       cache: LinkedList::new(),
+      sem: Arc::new(Semaphore::new(config.concurrency.unwrap_or(50))),
       cursor: None,
       client,
     }
@@ -174,6 +178,7 @@ impl Adapters for BlueSkyAdapter {
               media_url: url.replace("@jpeg", "@png"),
               client: self.client.clone(),
               filename: format!("{author} {id} {index}.png"),
+              sem: self.sem.clone(),
             });
           }
         }
@@ -204,6 +209,7 @@ impl Item for BlueSkyItem {
   
   fn get(&self) -> BoxedFuture<'_, bytes::Bytes> {
     Box::pin(async {
+      let _guard = self.sem.acquire().await.unwrap();
       loop {
         match self.client.get(&self.media_url).send().await.and_then(|r| r.error_for_status()){
           Ok(res) => return res.bytes().await.unwrap(),

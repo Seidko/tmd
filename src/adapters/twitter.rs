@@ -1,11 +1,12 @@
 use std::collections::LinkedList;
 use std::path::Path;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use bytes::Bytes;
 use reqwest::{Client, Proxy, StatusCode};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::{from_value, json, Value};
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use crate::insert;
 
@@ -75,6 +76,7 @@ struct TwitterConfig {
   cookies: String,
   csrf_token: String,
   page_size: Option<i32>,
+  concurrency: Option<usize>,
 }
 
 pub struct TwitterAdapter {
@@ -83,8 +85,9 @@ pub struct TwitterAdapter {
   cursor: Value,
   xhr: Client,
   file: Client,
-  cache: LinkedList<TwitterFav>,
+  cache: LinkedList<TwitterItem>,
   page_size: i32,
+  sem: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
@@ -93,12 +96,13 @@ pub struct UserInfo {
   fav_count: u64,
 }
 
-pub struct TwitterFav {
+pub struct TwitterItem {
   pub url: String,
   pub media_url: String,
   pub client: Client,
   pub filename: String,
   pub is_last: bool,
+  sem: Arc<Semaphore>,
 }
 
 impl TwitterAdapter {
@@ -137,6 +141,7 @@ impl TwitterAdapter {
       cursor: Value::Null,
       info: OnceLock::new(),
       cache: LinkedList::new(),
+      sem: Arc::new(Semaphore::new(config.concurrency.unwrap_or(50))),
       xhr,
       file,
     }
@@ -276,12 +281,13 @@ impl Adapters for TwitterAdapter {
                 _ => panic!("Unknown media type {}.", media_type)
               };
               let filename = format!("{username} {snowflake} {media_index}.{ext}");
-              self.cache.push_back(TwitterFav {
+              self.cache.push_back(TwitterItem {
                 client: self.file.clone(),
                 url: format!("http://x.com/{username}/status/{snowflake}/photo/{media_index}"),
                 media_url,
                 filename,
                 is_last: false,
+                sem: self.sem.clone(),
               });
             }
             if let Some(item) = self.cache.back_mut() {
@@ -305,7 +311,7 @@ impl Adapters for TwitterAdapter {
   }
 }
 
-impl Item for TwitterFav {
+impl Item for TwitterItem {
   fn filename(&self) -> &str {
     &self.filename
   }
@@ -320,6 +326,7 @@ impl Item for TwitterFav {
 
   fn get(&self) -> BoxedFuture<'_, Bytes> {
     Box::pin(async {
+      let _guard = self.sem.acquire().await.unwrap();
       loop {
         match self.client.get(&self.media_url).send().await.and_then(|r| r.error_for_status()){
           Ok(res) => return res.bytes().await.unwrap(),

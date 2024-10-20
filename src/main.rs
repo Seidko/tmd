@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{from_str, Value};
 use sysproxy::Sysproxy;
 use tokio::task::JoinHandle;
-use tokio::{fs::File, io::AsyncWriteExt, sync::{Semaphore, mpsc::unbounded_channel}};
+use tokio::{fs::File, io::AsyncWriteExt, sync::mpsc::unbounded_channel};
 use adapters::twitter::TwitterAdapter;
 use adapters::bluesky::BlueSkyAdapter;
 
@@ -24,7 +24,6 @@ fn pause() {
 #[derive(Serialize, Deserialize)]
 struct Config {
   accounts: Vec<Value>,
-  concurrency: Option<usize>,
   proxy: Option<String>,
   path: Option<String>,
   pause_on_end: Option<bool>,
@@ -86,7 +85,6 @@ async fn main() {
   media_pb.set_style(style.clone());
 
   for mut account in accounts.into_iter() {
-    let config = config.clone();
     let set = set.clone();
     let dir = dir.clone();
     let total_pbs = total_pbs.clone();
@@ -95,7 +93,6 @@ async fn main() {
     let style = style.clone();
     let fsx2 = fsx.clone();
     fsx.send(tokio::spawn(async move {
-      let sem = Arc::new(Semaphore::new(config.concurrency.unwrap_or(10)));
       let total_pb = if let Some(count) = account.count() {
         mprogress.add(ProgressBar::new(count.await))
       } else {
@@ -114,9 +111,7 @@ async fn main() {
         let media_pb = media_pb.clone();
         let total_pb = total_pb.clone();
         let dir = dir.clone();
-        let sem = sem.clone();
         fsx2.send(tokio::spawn(async move {
-          let _guard = sem.acquire();
           media_pb.set_message(item.url().to_owned());
 
           let path = Path::new(&dir).join(item.filename());
