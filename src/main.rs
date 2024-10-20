@@ -46,7 +46,7 @@ async fn main() {
   }
 
   let mprogress = MultiProgress::new();
-  let style = ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+  let style = ProgressStyle::with_template("[{prefix}] [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
   .unwrap()
   .progress_chars("##-");
 
@@ -79,40 +79,31 @@ async fn main() {
   }).collect();
 
   let _ = fs::create_dir(&dir);
-  let total_pbs: Arc<Mutex<Vec<ProgressBar>>> = Arc::new(Mutex::new(Vec::new()));
   let (fsx, mut frx) = unbounded_channel::<JoinHandle<()>>();
-  let media_pb = mprogress.add(ProgressBar::new(0));
-  media_pb.set_style(style.clone());
+  let pbs = Arc::new(Mutex::new(Vec::<ProgressBar>::new()));
 
   for mut account in accounts.into_iter() {
     let set = set.clone();
     let dir = dir.clone();
-    let total_pbs = total_pbs.clone();
-    let media_pb = media_pb.clone();
     let mprogress = mprogress.clone();
     let style = style.clone();
     let fsx2 = fsx.clone();
+    let pbs = pbs.clone();
     fsx.send(tokio::spawn(async move {
-      let total_pb = if let Some(count) = account.count() {
-        mprogress.add(ProgressBar::new(count.await))
-      } else {
-        let total_pb = mprogress.add(ProgressBar::new(1));
-        total_pb.set_message(format!("{} has no total count API.", account.platform()));
-        total_pb
-      };
-      total_pb.set_style(style);
-      total_pb.inc(1);
-      total_pbs.lock().unwrap().push(total_pb.clone());
+      let pb = mprogress.add(ProgressBar::new(0));
+      pb.set_style(style.clone());
+      pb.set_prefix(format!("{} {}", account.platform(), account.name()));
+      pbs.lock().unwrap().push(pb.clone());
+
       while let Some(item) = account.next().await {
         if set.contains(item.filename()) {
           continue;
         }
-        media_pb.inc_length(1);
-        let media_pb = media_pb.clone();
-        let total_pb = total_pb.clone();
+        pb.inc_length(1);
+        let pb = pb.clone();
         let dir = dir.clone();
         fsx2.send(tokio::spawn(async move {
-          media_pb.set_message(item.url().to_owned());
+          pb.set_message(item.url().to_owned());
 
           let path = Path::new(&dir).join(item.filename());
           match async {
@@ -122,10 +113,7 @@ async fn main() {
             Err(_) => println!("Cannot create file {}, url {}, skipped.", item.filename(), item.media_url()),
             _ => {}
           }
-          media_pb.inc(1);
-          if item.is_last().unwrap_or(false) {
-            total_pb.inc(1);
-          }
+          pb.inc(1);
         })).unwrap();
       }
     })).unwrap();
@@ -134,8 +122,7 @@ async fn main() {
   while let Ok(future) = frx.try_recv() {
     future.await.unwrap();
   }
-  total_pbs.lock().unwrap().iter().for_each(|v| v.set_message("Done!"));
-  media_pb.set_message("Done!");
+  pbs.lock().unwrap().iter().for_each(|v| v.set_message("Done!"));
   if config.pause_on_end.unwrap_or(false) {
     pause();
   }

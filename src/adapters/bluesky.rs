@@ -79,8 +79,8 @@ impl Adapters for BlueSkyAdapter {
     "bluesky"
   }
 
-  fn count(&self) -> Option<BoxedFuture<'_, u64>> {
-    None
+  fn name(&self) -> &str {
+    &self.account
   }
 
   #[inline(never)]
@@ -191,10 +191,6 @@ impl Adapters for BlueSkyAdapter {
 }
 
 impl Item for BlueSkyItem {
-  fn is_last(&self) -> Option<bool> {
-    None
-  }
-  
   fn filename(&self) -> &str {
     &self.filename
   }

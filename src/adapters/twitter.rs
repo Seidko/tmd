@@ -81,19 +81,13 @@ struct TwitterConfig {
 
 pub struct TwitterAdapter {
   pub username: String,
-  info: OnceLock<UserInfo>,
+  userid: OnceLock<String>,
   cursor: Value,
   xhr: Client,
   file: Client,
   cache: LinkedList<TwitterItem>,
   page_size: i32,
   sem: Arc<Semaphore>,
-}
-
-#[derive(Debug)]
-pub struct UserInfo {
-  userid: String,
-  fav_count: u64,
 }
 
 pub struct TwitterItem {
@@ -139,7 +133,7 @@ impl TwitterAdapter {
       username: config.user_name,
       page_size: config.page_size.unwrap_or(100),
       cursor: Value::Null,
-      info: OnceLock::new(),
+      userid: OnceLock::new(),
       cache: LinkedList::new(),
       sem: Arc::new(Semaphore::new(config.concurrency.unwrap_or(50))),
       xhr,
@@ -168,12 +162,8 @@ impl TwitterAdapter {
         Ok(json) => {
           let result = &json["data"]["user"]["result"];
           let userid = result["rest_id"].as_str().unwrap().to_owned();
-          let fav_count = result["legacy"]["favourites_count"].as_u64().unwrap();
 
-          self.info.set(UserInfo {
-            userid,
-            fav_count,
-          }).unwrap();
+          self.userid.set(userid).unwrap();
           break;
         }
         Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
@@ -193,15 +183,8 @@ impl Adapters for TwitterAdapter {
     "twitter"
   }
 
-  fn count(&self) -> Option<BoxedFuture<'_, u64>> {
-    Some(Box::pin(async {
-      if let Some(UserInfo { fav_count, .. }) = self.info.get() {
-        return fav_count.clone();
-      };
-  
-      self.init().await;
-      self.info.get().unwrap().fav_count.clone()
-    }))
+  fn name(&self) -> &str {
+    &self.username
   }
 
   fn next(&mut self) -> BoxedFuture<'_, Option<Box<dyn Item>>> {
@@ -212,11 +195,11 @@ impl Adapters for TwitterAdapter {
 
       let new_cursor: String;
       
-      if self.info.get().is_none() {
+      if self.userid.get().is_none() {
         self.init().await;
       }
       let query =   [
-        ("variables", &tweet_variables(&self.info.get().unwrap().userid, &self.cursor, self.page_size)),
+        ("variables", &tweet_variables(self.userid.get().unwrap(), &self.cursor, self.page_size)),
         ("features", &*TWEET_FEATURE)
       ];
 
@@ -340,9 +323,5 @@ impl Item for TwitterItem {
         }
       };
     })
-  }
-
-  fn is_last(&self) -> Option<bool> {
-    Some(self.is_last)
   }
 }

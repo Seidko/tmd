@@ -11,7 +11,7 @@ pub const BEARER: &'static str = "Bearer ";
 
 pub trait Adapters: Send + Sync {
   fn platform(&self) -> &'static str;
-  fn count(&self) -> Option<BoxedFuture<'_, u64>>;
+  fn name(&self) -> &str;
   fn next(&mut self) -> BoxedFuture<'_, Option<Box<dyn Item>>>;
 }
 
@@ -20,7 +20,6 @@ pub trait Item: Send + Sync {
   fn url(&self) -> &str;
   fn media_url(&self) -> &str;
   fn get(&self) -> BoxedFuture<'_, Bytes>;
-  fn is_last(&self) -> Option<bool>;
 }
 
 #[macro_export]
