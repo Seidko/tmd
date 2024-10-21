@@ -215,6 +215,10 @@ impl Adapters for TwitterAdapter {
             .query(&query)
             .send().await?.error_for_status()?.json::<Value>().await
         }.await {
+          Ok(json) if json.get("error").is_some() => {
+            println!("Warning: server interal error, sleep 5 secs and retrying...");
+            sleep(FIVE_SECOUND).await;
+          },
           Ok(json) => break json,
           Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
             println!("Warning: too many request, sleep 5 secs and retrying...");
