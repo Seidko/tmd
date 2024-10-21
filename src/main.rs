@@ -2,7 +2,8 @@
 
 mod adapters;
 
-use std::sync::Mutex;
+use std::collections::LinkedList;
+use std::time::Duration;
 use std::{collections::HashSet, env, fs, io::Read, panic, path::Path, sync::Arc};
 use adapters::Adapters;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -11,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{from_str, Value};
 use sysproxy::Sysproxy;
 use tokio::task::JoinHandle;
-use tokio::{fs::File, io::AsyncWriteExt, sync::mpsc::unbounded_channel};
+use tokio::time::sleep;
+use tokio::{fs::File, io::AsyncWriteExt};
 use adapters::twitter::TwitterAdapter;
 use adapters::bluesky::BlueSkyAdapter;
 
@@ -77,20 +79,24 @@ async fn main() {
     (account, set)
   }).collect();
 
-  let (fsx, mut frx) = unbounded_channel::<JoinHandle<()>>();
-  let pbs = Arc::new(Mutex::new(Vec::<ProgressBar>::new()));
+  let mut handles = LinkedList::<JoinHandle<()>>::new();
 
   for (mut account, set) in accounts.into_iter() {
     let set = set.clone();
     let mprogress = mprogress.clone();
     let style = style.clone();
-    let fsx2 = fsx.clone();
-    let pbs = pbs.clone();
-    fsx.send(tokio::spawn(async move {
+    handles.push_back(tokio::spawn(async move {
       let pb = mprogress.add(ProgressBar::new(0));
       pb.set_style(style.clone());
       pb.set_prefix(format!("{} {}", account.platform(), account.name()));
-      pbs.lock().unwrap().push(pb.clone());
+      let tick = pb.clone();
+      let ticker = tokio::spawn(async move {
+        loop {
+          sleep(Duration::from_secs(1)).await;
+          tick.tick();
+        }
+      });
+      let mut handles = LinkedList::<JoinHandle<()>>::new();
 
       while let Some(item) = account.next().await {
         pb.inc_length(1);
@@ -100,26 +106,36 @@ async fn main() {
         }
         let pb = pb.clone();
         let dir = account.path().to_owned();
-        fsx2.send(tokio::spawn(async move {
+        handles.push_back(tokio::spawn(async move {
           pb.set_message(item.url().to_owned());
           let path = Path::new(&dir).join(item.filename());
           match async {
+            let bytes = item.get().await;
             let mut file = File::create(&path).await?;
-            file.write(&item.get().await).await
+            file.write(&bytes).await
           }.await {
             Err(_) => println!("Cannot create file {}, url {}, skipped.", item.filename(), item.media_url()),
             _ => {}
           }
           pb.inc(1);
-        })).unwrap();
+        }));
       }
-    })).unwrap();
+      
+      for handle in handles {
+        handle.await.unwrap();
+      };
+      ticker.abort();
+      let secs = pb.elapsed().as_secs();
+      let h = secs / 3600;
+      let m = (secs % 3600) / 60;
+      let s = secs % 60;
+      mprogress.println(format!("[{} {}] [{h:02}:{m:02}:{s:02}] all tasks Done!", account.platform(), account.name())).unwrap();
+    }));
   }
   
-  while let Ok(future) = frx.try_recv() {
-    future.await.unwrap();
+  for handle in handles {
+    handle.await.unwrap();
   }
-  pbs.lock().unwrap().iter().for_each(|v| v.set_message("Done!"));
   if config.pause_on_end.unwrap_or(false) {
     pause();
   }
