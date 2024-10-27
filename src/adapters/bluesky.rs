@@ -110,8 +110,8 @@ impl Adapters for BlueSkyAdapter {
               .header("content-type", "application/json")
               .send().await?.json::<Value>().await
           }.await {
-            Ok(json) if json.get("error").is_some() => {
-              panic!("{} {}", json["error"].as_str().unwrap(), json["message"].as_str().unwrap());
+            Ok(json) if json.get("errors").is_some() => {
+              panic!("{} {}", json["errors"].as_str().unwrap(), json["message"].as_str().unwrap());
             }
             Ok(json) => {
               break self.auth.get_or_init(|| Auth {
