@@ -1,4 +1,4 @@
-#![feature(try_blocks, async_iterator, let_chains)]
+#![feature(try_blocks)]
 
 mod adapters;
 
