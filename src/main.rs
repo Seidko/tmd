@@ -109,13 +109,16 @@ async fn main() {
         handles.push_back(tokio::spawn(async move {
           pb.set_message(item.url().to_owned());
           let path = Path::new(&dir).join(item.filename());
-          match async {
-            let bytes = item.get().await;
-            let mut file = File::create(&path).await?;
-            file.write(&bytes).await
-          }.await {
-            Err(_) => println!("Cannot create file {}, url {}, skipped.", item.filename(), item.media_url()),
-            _ => {}
+          let bytes = &mut item.get().await;
+          let result = File::create(&path).await;
+          if result.is_err() {
+            println!("Cannot create file {}, url {}, skipped.", item.filename(), item.media_url());
+          } else {
+            let mut file = result.unwrap();
+            let result = file.write_all_buf(bytes).await;
+            if result.is_err() {
+              println!("IO error in {}, url {}.", item.filename(), item.media_url());
+            }
           }
           pb.inc(1);
         }));

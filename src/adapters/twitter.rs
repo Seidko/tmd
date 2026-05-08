@@ -1,7 +1,8 @@
+use std::cell::OnceCell;
 use std::collections::LinkedList;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, OnceLock};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use reqwest::{Client, Proxy, StatusCode};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
@@ -174,6 +175,7 @@ impl TwitterAdapter {
           println!("Warning: too many request, sleep 5 secs and retrying...");
           sleep(FIVE_SECOUND).await;
         }
+        Err(err) if err.is_connect() => {}
         Err(err) => {
           println!("Unknown request error {:?}, retrying...", err);
         }
@@ -209,101 +211,119 @@ impl Adapters for TwitterAdapter {
         ("features", &*TWEET_FEATURE)
       ];
 
-      let json = loop {
-        match async {
-          self.xhr.get("https://api.twitter.com/graphql/QK8AVO3RpcnbLPKXLAiVog/Likes")
-            .query(&query)
-            .send().await?.error_for_status()?.json::<Value>().await
-        }.await {
-          Ok(json) if json.get("error").is_some() => {
-            println!("Warning: server interal error, sleep 5 secs and retrying...");
-            sleep(FIVE_SECOUND).await;
-          },
-          Ok(json) => break json,
-          Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
-            println!("Warning: too many request, sleep 5 secs and retrying...");
-            sleep(FIVE_SECOUND).await;
+      
+      let mut retry_count = 0;
+      let mut is_error: Option<()> = Some(());
+      let mut json: Value = Value::Null;
+      while retry_count < 5 {
+        json = loop {
+          match async {
+            self.xhr.get("https://api.twitter.com/graphql/QK8AVO3RpcnbLPKXLAiVog/Likes")
+              .query(&query)
+              .send().await?.error_for_status()?.json::<Value>().await
+          }.await {
+            Ok(json) if json.get("error").is_some() => {
+              println!("Warning: server interal error, sleep 5 secs and retrying...");
+              sleep(FIVE_SECOUND).await;
+            },
+            Ok(json) => break json,
+            Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
+              println!("Warning: too many request, sleep 5 secs and retrying...");
+              sleep(FIVE_SECOUND).await;
+            }
+            Err(err) if err.is_connect() => {}
+            Err(err) => {
+              println!("Unknown request error {:?}, retrying...", err);
+            }
           }
-          Err(err) => {
-            println!("Unknown request error {:?}, retrying...", err);
+        };
+
+        is_error = try {
+          let timeline = json["data"]["user"]["result"].get("timeline")
+            .or(json["data"]["user"]["result"].get("timeline_v2"))?;
+        
+          let likes = timeline["timeline"]["instructions"][0]["entries"].as_array()?;
+          let new_cursor = likes.last()?["content"]["value"].as_str()?.to_owned();
+          for item in likes {
+            let result = &item["content"]["itemContent"]["tweet_results"]["result"];
+            if result.is_null() {
+              continue;
+            }
+          
+            let snowflake = result["legacy"]["id_str"].as_str()
+              .or(result["tweet"]["legacy"]["id_str"].as_str())
+              ?.to_owned().parse::<u64>().ok()?;
+          
+            let username = result["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str()
+              .or(result["tweet"]["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str())
+              ?.to_owned();
+          
+            let temp = &result["legacy"]["entities"]["media"];
+            let media = temp.as_array();
+          
+            if let Some(media) = media {
+              for (media_index, item) in media.iter().enumerate() {
+                let media_index = media_index + 1;
+                let media_type = item["type"].as_str()?;
+                let (media_url, ext) = match media_type {
+                  "photo" => {
+                    let media_url_https = item["media_url_https"].as_str()?.to_owned();
+                    let url = media_url_https.clone() + "?name=orig";
+                    let ext = Path::new(media_url_https.as_str()).extension().unwrap().to_str().unwrap().to_owned();
+                    (url, ext)
+                  }
+                  "animated_gif" | "video" => {
+                    let media_url_https = item["video_info"]["variants"]
+                      .as_array()?
+                      .last()?["url"]
+                      .as_str()?.to_owned();
+                    (media_url_https, "mp4".to_owned())
+                  }
+                  _ => panic!("Unknown media type {}.", media_type)
+                };
+                let filename = format!("{username} {snowflake} {media_index}.{ext}");
+                self.cache.push_back(TwitterItem {
+                  client: self.file.clone(),
+                  url: format!("http://x.com/{username}/status/{snowflake}/photo/{media_index}"),
+                  media_url,
+                  filename,
+                  is_last: false,
+                  sem: self.sem.clone(),
+                });
+              }
+              if let Some(item) = self.cache.back_mut() {
+                item.is_last = true
+              }
+            }
           }
+        
+          if new_cursor == self.cursor {
+            return None;
+          }
+        
+          self.cursor = Value::String(new_cursor);
+        
+          return self.cache.pop_front().map(|v| Box::new(v) as Box<dyn Item>);
+        };
+        if is_error.is_none() {
+          let mut file = tokio::fs::File::create("./twitter_sample.json").await.unwrap();
+          file.write(to_string_pretty(&json).unwrap().as_bytes()).await.unwrap();
+          println!("Warning: malform json, sleep 5 secs and retrying...");
+          sleep(FIVE_SECOUND).await;
+        } else {
+          println!("Undefined behavior， sleep 5 secs and retrying...");
+          sleep(FIVE_SECOUND).await;
         }
+        retry_count += 1;
       };
 
-      let is_error: Option<()> = try {
-        let timeline = json["data"]["user"]["result"].get("timeline")
-          .or(json["data"]["user"]["result"].get("timeline_v2"))?;
-    
-        let likes = timeline["timeline"]["instructions"][0]["entries"].as_array()?;
-        let new_cursor = likes.last()?["content"]["value"].as_str()?.to_owned();
-        for item in likes {
-          let result = &item["content"]["itemContent"]["tweet_results"]["result"];
-          if result.is_null() {
-            continue;
-          }
-    
-          let snowflake = result["legacy"]["id_str"].as_str()
-            .or(result["tweet"]["legacy"]["id_str"].as_str())
-            ?.to_owned().parse::<u64>().ok()?;
-    
-          let username = result["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str()
-            .or(result["tweet"]["core"]["user_results"]["result"]["legacy"]["screen_name"].as_str())
-            ?.to_owned();
-    
-          let temp = &result["legacy"]["entities"]["media"];
-          let media = temp.as_array();
-    
-          if let Some(media) = media {
-            for (media_index, item) in media.iter().enumerate() {
-              let media_index = media_index + 1;
-              let media_type = item["type"].as_str()?;
-              let (media_url, ext) = match media_type {
-                "photo" => {
-                  let media_url_https = item["media_url_https"].as_str()?.to_owned();
-                  let url = media_url_https.clone() + "?name=orig";
-                  let ext = Path::new(media_url_https.as_str()).extension().unwrap().to_str().unwrap().to_owned();
-                  (url, ext)
-                }
-                "animated_gif" | "video" => {
-                  let media_url_https = item["video_info"]["variants"]
-                    .as_array()?
-                    .last()?["url"]
-                    .as_str()?.to_owned();
-                  (media_url_https, "mp4".to_owned())
-                }
-                _ => panic!("Unknown media type {}.", media_type)
-              };
-              let filename = format!("{username} {snowflake} {media_index}.{ext}");
-              self.cache.push_back(TwitterItem {
-                client: self.file.clone(),
-                url: format!("http://x.com/{username}/status/{snowflake}/photo/{media_index}"),
-                media_url,
-                filename,
-                is_last: false,
-                sem: self.sem.clone(),
-              });
-            }
-            if let Some(item) = self.cache.back_mut() {
-              item.is_last = true
-            }
-          }
-        }
-    
-        if new_cursor == self.cursor {
-          return None;
-        }
-    
-        self.cursor = Value::String(new_cursor);
-    
-        return self.cache.pop_front().map(|v| Box::new(v) as Box<dyn Item>);
-      };
       if is_error.is_none() {
         let mut file = tokio::fs::File::create("./twitter_sample.json").await.unwrap();
         file.write(to_string_pretty(&json).unwrap().as_bytes()).await.unwrap();
         panic!("Error: malform json");
       } else {
         panic!("Undefined behavior.");
-      }
+      };
     };
     Box::pin(futures)
   }
@@ -325,18 +345,47 @@ impl Item for TwitterItem {
   fn get(&self) -> BoxedFuture<'_, Bytes> {
     Box::pin(async {
       let _guard = self.sem.acquire().await.unwrap();
-      loop {
-        match self.client.get(&self.media_url).send().await.and_then(|r| r.error_for_status()){
-          Ok(res) => return res.bytes().await.unwrap(),
+      let mut bytes = BytesMut::new();
+      let content_length = OnceCell::<u64>::new();
+      while {
+        let mut req = self.client.get(&self.media_url);
+        if bytes.len() > 0 {
+          req = req.header("Range", bytes.len());
+        }
+        match req.send().await.and_then(|r| r.error_for_status()){
+          Ok(res) => {
+            let _ = content_length.set(res.content_length().unwrap_or(0));
+            match res.bytes().await {
+              Ok(b) => bytes.extend(b),
+              Err(err) => println!("IO error {:?}, retrying...", err),
+            };
+          },
           Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
             println!("Warning: too many request, sleep 5 secs and retrying...");
             sleep(FIVE_SECOUND).await;
           }
+          Err(err) if err.is_connect() => {}
           Err(err) => {
             println!("Unknown request error {:?}, retrying...", err);
           }
-        }
-      };
+        };
+        let is_complete = content_length.get().map(|v| bytes.len() as u64 >= *v).unwrap_or(false);
+        !is_complete
+      } {}
+
+      return bytes.freeze();
+      // loop {
+      //   match self.client.get(&self.media_url).send().await.and_then(|r| r.error_for_status()){
+      //     Ok(res) => return res.bytes().await.unwrap(),
+      //     Err(err) if err.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
+      //       println!("Warning: too many request, sleep 5 secs and retrying...");
+      //       sleep(FIVE_SECOUND).await;
+      //     }
+      //     Err(err) => {
+      //       println!("Unknown request error {:?}, retrying...", err);
+      //     }
+      //   }
+      // };
     })
   }
 }

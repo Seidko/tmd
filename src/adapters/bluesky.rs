@@ -124,6 +124,7 @@ impl Adapters for BlueSkyAdapter {
               println!("Warning: too many request, sleep 5 secs and retrying...");
               sleep(FIVE_SECOUND).await;
             }
+            Err(err) if err.is_connect() => {}
             Err(err) => {
               println!("Unknown request error {:?}, retrying...", err);
             }
@@ -155,6 +156,7 @@ impl Adapters for BlueSkyAdapter {
               println!("Warning: too many request, sleep 5 secs and retrying...");
               sleep(FIVE_SECOUND).await;
             }
+            Err(err) if err.is_connect() => {}
             Err(err) => {
               println!("Unknown request error {:?}, retrying...", err);
             }
@@ -220,6 +222,7 @@ impl Item for BlueSkyItem {
             println!("Warning: too many request, sleep 5 secs and retrying...");
             sleep(FIVE_SECOUND).await;
           }
+          Err(err) if err.is_connect() => {}
           Err(err) => {
             println!("Unknown request error {:?}, retrying...", err);
           }
